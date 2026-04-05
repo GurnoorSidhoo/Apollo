@@ -677,6 +677,363 @@ class ApolloReliabilityTests(unittest.TestCase):
         planner.assert_not_called()
         say_mock.assert_called_with("Sorry, I didn't understand that")
 
+    def test_wait_for_state_success(self):
+        state = {"now": 0.0, "calls": 0}
+
+        def fake_monotonic():
+            return state["now"]
+
+        def fake_sleep(seconds):
+            state["now"] += seconds
+
+        def condition():
+            state["calls"] += 1
+            return state["calls"] >= 3
+
+        with mock.patch.object(apollo.time, "monotonic", side_effect=fake_monotonic):
+            with mock.patch.object(apollo.time, "sleep", side_effect=fake_sleep):
+                handled = apollo.wait_for_state(
+                    condition,
+                    timeout_seconds=1.0,
+                    poll_interval=0.2,
+                    condition_name="unit_test_condition",
+                )
+
+        self.assertTrue(handled)
+        self.assertEqual(state["calls"], 3)
+
+    def test_wait_for_state_times_out(self):
+        state = {"now": 0.0}
+
+        def fake_monotonic():
+            return state["now"]
+
+        def fake_sleep(seconds):
+            state["now"] += seconds
+
+        with mock.patch.object(apollo.time, "monotonic", side_effect=fake_monotonic):
+            with mock.patch.object(apollo.time, "sleep", side_effect=fake_sleep):
+                handled = apollo.wait_for_state(
+                    lambda: False,
+                    timeout_seconds=0.5,
+                    poll_interval=0.2,
+                    condition_name="timeout_case",
+                )
+
+        self.assertFalse(handled)
+
+    def test_wait_for_state_recovers_from_condition_exception(self):
+        state = {"now": 0.0, "calls": 0}
+
+        def fake_monotonic():
+            return state["now"]
+
+        def fake_sleep(seconds):
+            state["now"] += seconds
+
+        def condition():
+            state["calls"] += 1
+            if state["calls"] == 1:
+                raise RuntimeError("transient AX issue")
+            return True
+
+        with mock.patch.object(apollo.time, "monotonic", side_effect=fake_monotonic):
+            with mock.patch.object(apollo.time, "sleep", side_effect=fake_sleep):
+                handled = apollo.wait_for_state(
+                    condition,
+                    timeout_seconds=1.0,
+                    poll_interval=0.2,
+                    condition_name="exception_case",
+                )
+
+        self.assertTrue(handled)
+
+    def test_validate_workflow_output_accepts_wait_for_state(self):
+        result = apollo.validate_workflow_output({
+            "description": "Waiting for Finder",
+            "steps": [
+                {
+                    "type": "wait_for_state",
+                    "condition": "app_frontmost",
+                    "app": "Finder",
+                    "timeout_seconds": "2.5",
+                    "poll_interval": "0.2",
+                    "reason": "wait for finder",
+                },
+            ],
+        })
+
+        step = result["steps"][0]
+        self.assertEqual(step["type"], "wait_for_state")
+        self.assertEqual(step["condition"], "app_frontmost")
+        self.assertEqual(step["app"], "Finder")
+        self.assertEqual(step["timeout_seconds"], 2.5)
+        self.assertEqual(step["poll_interval"], 0.2)
+
+    def test_validate_workflow_output_rejects_wait_for_state_missing_label(self):
+        with self.assertRaises(apollo.PlannerValidationError):
+            apollo.validate_workflow_output({
+                "description": "Waiting for sidebar item",
+                "steps": [
+                    {
+                        "type": "wait_for_state",
+                        "condition": "element_exists",
+                        "app": "Finder",
+                        "reason": "wait for sidebar",
+                    },
+                ],
+            })
+
+    def test_validate_vision_action_output_is_backward_compatible(self):
+        result = apollo.validate_vision_action_output({
+            "action": "click",
+            "x": 20,
+            "y": 10,
+            "description": "Click play",
+        })
+
+        self.assertEqual(result["action"], "click")
+        self.assertEqual(result["x"], 20)
+        self.assertEqual(result["y"], 10)
+        self.assertNotIn("confidence", result)
+        self.assertNotIn("target_label", result)
+
+    def test_execute_vision_task_rejects_low_confidence_click(self):
+        resolution = {
+            "source": "vision",
+            "target_app": "Finder",
+            "action": {
+                "action": "click",
+                "x": 100,
+                "y": 200,
+                "description": "Click risky target",
+                "confidence": 0.59,
+            },
+            "metadata": {"coordinate_space": "global"},
+        }
+
+        with mock.patch.object(apollo, "resolve_ui_target", return_value=resolution):
+            with mock.patch.object(apollo, "say"):
+                with mock.patch.object(apollo, "click_at") as click_at:
+                    with mock.patch.object(apollo, "verify_postcondition") as verify_postcondition:
+                        handled = apollo.execute_vision_task("Click risky target", "click risky target")
+
+        self.assertFalse(handled)
+        click_at.assert_not_called()
+        verify_postcondition.assert_not_called()
+
+    def test_execute_vision_task_allows_threshold_confidence_click(self):
+        resolution = {
+            "source": "vision",
+            "target_app": "Finder",
+            "action": {
+                "action": "click",
+                "x": 140,
+                "y": 90,
+                "description": "Click safe target",
+                "confidence": 0.6,
+                "expected_postcondition": "The pane is visible",
+            },
+            "metadata": {"coordinate_space": "global"},
+        }
+
+        with mock.patch.object(apollo, "resolve_ui_target", return_value=resolution):
+            with mock.patch.object(apollo, "verify_postcondition", return_value={
+                "status": "verified",
+                "reason": "verified",
+                "method": "ax",
+                "used_gemini": False,
+            }):
+                with mock.patch.object(apollo, "say"):
+                    with mock.patch.object(apollo, "log_command"):
+                        with mock.patch.object(apollo.time, "sleep"):
+                            with mock.patch.object(apollo, "click_at") as click_at:
+                                handled = apollo.execute_vision_task("Click safe target", "click safe target")
+
+        self.assertTrue(handled)
+        click_at.assert_called_once_with(140, 90)
+
+    def test_should_use_accessibility_prefers_finder(self):
+        self.assertTrue(apollo.should_use_accessibility("Finder", 'Click "Downloads" in the sidebar'))
+
+    def test_should_use_accessibility_avoids_vscode_and_spotify(self):
+        self.assertFalse(apollo.should_use_accessibility("Visual Studio Code", 'Click the Explorer button'))
+        self.assertFalse(apollo.should_use_accessibility("Spotify", 'Click the play button'))
+
+    def test_query_ax_element_clamps_depth_and_results(self):
+        completed = mock.Mock(
+            returncode=0,
+            stdout='{"status":"ok","matches":[],"visited":0}',
+            stderr="",
+        )
+        with mock.patch.object(apollo.subprocess, "run", return_value=completed) as run_mock:
+            result = apollo.query_ax_element(
+                "Finder",
+                target_label="Downloads",
+                target_role="button",
+                max_depth=999,
+                max_results=999,
+            )
+
+        self.assertEqual(result, [])
+        command = run_mock.call_args.args[0]
+        self.assertEqual(command[-3], str(apollo.AX_QUERY_MAX_DEPTH))
+        self.assertEqual(command[-2], str(apollo.AX_QUERY_MAX_RESULTS))
+        self.assertEqual(command[-1], str(apollo.AX_QUERY_MAX_CHILDREN))
+
+    def test_query_ax_element_returns_none_on_timeout(self):
+        with mock.patch.object(
+            apollo.subprocess,
+            "run",
+            side_effect=apollo.subprocess.TimeoutExpired(cmd=["osascript"], timeout=apollo.AX_QUERY_TIMEOUT_SECONDS),
+        ):
+            result = apollo.query_ax_element("Finder", target_label="Downloads")
+
+        self.assertIsNone(result)
+
+    def test_resolve_ui_target_ax_hit_skips_gemini(self):
+        ax_match = {
+            "label": "Downloads",
+            "role": "AXRow",
+            "center_x": 64,
+            "center_y": 128,
+        }
+        with mock.patch.object(apollo, "ax_get_window_count", return_value=1):
+            with mock.patch.object(apollo, "ax_get_focused_element_value", return_value=""):
+                with mock.patch.object(apollo, "query_ax_element", return_value=[ax_match]):
+                    with mock.patch.object(apollo, "capture_vision_frame") as capture_vision_frame:
+                        with mock.patch.object(apollo, "request_vision_action") as request_vision_action:
+                            result = apollo.resolve_ui_target(
+                                "Finder",
+                                'Click the sidebar item labeled "Downloads"',
+                                "open finder",
+                            )
+
+        self.assertEqual(result["source"], "ax")
+        self.assertEqual(result["action"]["confidence"], 1.0)
+        capture_vision_frame.assert_not_called()
+        request_vision_action.assert_not_called()
+
+    def test_resolve_ui_target_ax_miss_falls_back_to_vision(self):
+        metadata = {
+            "region_x": 0.0,
+            "region_y": 0.0,
+            "logical_width": 100.0,
+            "logical_height": 100.0,
+            "pixel_width": 200,
+            "pixel_height": 200,
+            "scale_x": 2.0,
+            "scale_y": 2.0,
+            "coordinate_space": "image",
+            "screenshot_path": None,
+            "screenshot_region": None,
+        }
+        action = {"action": "click", "x": 10, "y": 20, "description": "Click Downloads"}
+        with mock.patch.object(apollo, "ax_get_window_count", return_value=1):
+            with mock.patch.object(apollo, "ax_get_focused_element_value", return_value=""):
+                with mock.patch.object(apollo, "query_ax_element", return_value=[]):
+                    with mock.patch.object(apollo, "capture_vision_frame", return_value=(b"image", metadata)) as capture:
+                        with mock.patch.object(apollo, "request_vision_action", return_value=action) as request:
+                            result = apollo.resolve_ui_target(
+                                "Finder",
+                                'Click the sidebar item labeled "Downloads"',
+                                "open finder",
+                            )
+
+        self.assertEqual(result["source"], "vision")
+        capture.assert_called_once()
+        request.assert_called_once()
+
+    def test_execute_vision_task_click_verification_success(self):
+        resolution = {
+            "source": "vision",
+            "target_app": "Finder",
+            "action": {
+                "action": "click",
+                "x": 10,
+                "y": 20,
+                "description": "Click Downloads",
+                "expected_postcondition": 'The "Downloads" view is visible',
+            },
+            "metadata": {"coordinate_space": "global"},
+        }
+        with mock.patch.object(apollo, "resolve_ui_target", return_value=resolution):
+            with mock.patch.object(apollo, "verify_postcondition", return_value={
+                "status": "verified",
+                "reason": "verified by AX",
+                "method": "ax",
+                "used_gemini": False,
+            }):
+                with mock.patch.object(apollo, "say"):
+                    with mock.patch.object(apollo, "log_command"):
+                        with mock.patch.object(apollo.time, "sleep"):
+                            with mock.patch.object(apollo, "click_at") as click_at:
+                                handled = apollo.execute_vision_task("Click Downloads", "click downloads")
+
+        self.assertTrue(handled)
+        click_at.assert_called_once_with(10, 20)
+
+    def test_execute_vision_task_click_verification_retry_then_success(self):
+        resolution = {
+            "source": "vision",
+            "target_app": "Finder",
+            "action": {
+                "action": "click",
+                "x": 10,
+                "y": 20,
+                "description": "Click Downloads",
+                "expected_postcondition": 'The "Downloads" view is visible',
+            },
+            "metadata": {"coordinate_space": "global"},
+        }
+        with mock.patch.object(apollo, "resolve_ui_target", side_effect=[resolution, resolution]) as resolve_ui_target:
+            with mock.patch.object(apollo, "verify_postcondition", side_effect=[
+                {"status": "unverified", "reason": "not yet", "method": "ax", "used_gemini": False},
+                {"status": "verified", "reason": "done", "method": "ax", "used_gemini": False},
+            ]):
+                with mock.patch.object(apollo, "say"):
+                    with mock.patch.object(apollo, "log_command"):
+                        with mock.patch.object(apollo.time, "sleep"):
+                            with mock.patch.object(apollo, "click_at") as click_at:
+                                handled = apollo.execute_vision_task("Click Downloads", "click downloads")
+
+        self.assertTrue(handled)
+        self.assertEqual(resolve_ui_target.call_count, 2)
+        self.assertEqual(click_at.call_count, 2)
+
+    def test_click_verification_failure_returns_false_and_workflow_fails(self):
+        resolution = {
+            "source": "vision",
+            "target_app": "Finder",
+            "action": {
+                "action": "click",
+                "x": 10,
+                "y": 20,
+                "description": "Click Downloads",
+                "expected_postcondition": 'The "Downloads" view is visible',
+            },
+            "metadata": {"coordinate_space": "global"},
+        }
+        workflow = {
+            "description": "Clicking Downloads",
+            "steps": [
+                {"type": "vision", "task": "Click Downloads", "reason": "open downloads"},
+            ],
+        }
+        with mock.patch.object(apollo, "resolve_ui_target", side_effect=[resolution, resolution]):
+            with mock.patch.object(apollo, "verify_postcondition", side_effect=[
+                {"status": "unverified", "reason": "still closed", "method": "ax", "used_gemini": False},
+                {"status": "unverified", "reason": "still closed", "method": "ax", "used_gemini": False},
+            ]):
+                with mock.patch.object(apollo, "say"):
+                    with mock.patch.object(apollo, "log_command"):
+                        with mock.patch.object(apollo.time, "sleep"):
+                            with mock.patch.object(apollo, "click_at"):
+                                ok, details = apollo.execute_workflow_once(workflow, "click downloads")
+
+        self.assertFalse(ok)
+        self.assertEqual(details["reason"], "step_returned_false")
+
 
 if __name__ == "__main__":
     unittest.main()

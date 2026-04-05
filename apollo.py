@@ -40,7 +40,7 @@ import urllib.error
 import uuid
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Literal, TypedDict, Union
+from typing import Any, Callable, Dict, List, Literal, Optional, TypedDict, Union
 from urllib.parse import urlparse
 
 
@@ -116,11 +116,61 @@ MAX_WORKFLOW_STEPS = 12
 MAX_WORKFLOW_REPLANS = 2
 MAX_WORKFLOW_VISION_STEPS = 4
 MAX_WORKFLOW_WAIT_SECONDS = 5.0
+WAIT_FOR_STATE_DEFAULT_TIMEOUT_SECONDS = _read_env_float("APOLLO_WAIT_FOR_STATE_TIMEOUT_SECONDS", 5.0)
+WAIT_FOR_STATE_DEFAULT_POLL_INTERVAL = _read_env_float("APOLLO_WAIT_FOR_STATE_POLL_INTERVAL", 0.3)
+WAIT_FOR_STATE_MIN_POLL_INTERVAL = _read_env_float("APOLLO_WAIT_FOR_STATE_MIN_POLL_INTERVAL", 0.1)
+WAIT_FOR_STATE_MAX_POLL_INTERVAL = _read_env_float("APOLLO_WAIT_FOR_STATE_MAX_POLL_INTERVAL", 1.0)
 ROUTER_MAX_OUTPUT_TOKENS = 200
 WORKFLOW_PLANNER_MAX_OUTPUT_TOKENS = 700
 ROUTER_TIMEOUT_SECONDS = 30.0
 WORKFLOW_PLANNER_TIMEOUT_SECONDS = 60.0
 GEMINI_STRUCTURED_REPAIR_INSTRUCTION = "Return ONLY a valid JSON object matching the response schema."
+AX_QUERY_TIMEOUT_SECONDS = _read_env_float("APOLLO_AX_QUERY_TIMEOUT_SECONDS", 1.5)
+AX_QUERY_MAX_DEPTH = _read_env_int("APOLLO_AX_QUERY_MAX_DEPTH", 5)
+AX_QUERY_MAX_RESULTS = _read_env_int("APOLLO_AX_QUERY_MAX_RESULTS", 10)
+AX_QUERY_MAX_CHILDREN = _read_env_int("APOLLO_AX_QUERY_MAX_CHILDREN", 40)
+VISION_MIN_CLICK_CONFIDENCE = _read_env_float("APOLLO_VISION_MIN_CLICK_CONFIDENCE", 0.6)
+VISION_CLICK_SETTLE_SECONDS = _read_env_float("APOLLO_VISION_CLICK_SETTLE_SECONDS", 0.4)
+VISION_CLICK_RETRY_LIMIT = max(1, _read_env_int("APOLLO_VISION_CLICK_RETRY_LIMIT", 2))
+VISION_VERIFICATION_TIMEOUT_SECONDS = _read_env_float("APOLLO_VISION_VERIFICATION_TIMEOUT_SECONDS", 10.0)
+AX_PREFERRED_APPS = {
+    "Finder",
+    "Mail",
+    "Messages",
+    "Notes",
+    "Preview",
+    "System Settings",
+    "TextEdit",
+}
+AX_AVOID_APPS = {
+    "Claude",
+    "Discord",
+    "Google Chrome",
+    "Slack",
+    "Spotify",
+    "Visual Studio Code",
+}
+WAIT_FOR_STATE_CONDITIONS = {
+    "app_frontmost",
+    "window_exists",
+    "element_exists",
+    "element_value_contains",
+}
+AX_ROLE_KEYWORDS = {
+    "button": "button",
+    "tab": "tab",
+    "checkbox": "checkbox",
+    "check box": "checkbox",
+    "radio": "radio",
+    "menu": "menu",
+    "dialog": "window",
+    "window": "window",
+    "field": "text field",
+    "text field": "text field",
+    "input": "text field",
+    "search": "text field",
+    "sidebar": "group",
+}
 VISION_HINT_WORDS = {
     "click", "tap", "press", "button", "tab", "section", "feature",
     "chat", "sidebar", "panel", "screen", "onscreen", "on", "window",
@@ -296,6 +346,21 @@ class WaitStep(TypedDict):
     reason: str
 
 
+class _WaitForStateStepRequired(TypedDict):
+    type: Literal["wait_for_state"]
+    condition: Literal["app_frontmost", "window_exists", "element_exists", "element_value_contains"]
+    reason: str
+
+
+class WaitForStateStep(_WaitForStateStepRequired, total=False):
+    app: str
+    label: str
+    role: str
+    substring: str
+    timeout_seconds: float
+    poll_interval: float
+
+
 class VisionStep(TypedDict):
     type: Literal["vision"]
     task: str
@@ -317,6 +382,7 @@ WorkflowStep = Union[
     KeypressStep,
     TypeTextStep,
     WaitStep,
+    WaitForStateStep,
     VisionStep,
     SayStep,
 ]
@@ -330,11 +396,22 @@ class WorkflowPlannerOutput(TypedDict):
 WorkflowReplanOutput = WorkflowPlannerOutput
 
 
-class VisionClickAction(TypedDict):
+class VisionActionMetadata(TypedDict, total=False):
+    target_label: str
+    confidence: float
+    rationale: str
+    expected_postcondition: str
+
+
+class _VisionClickActionRequired(TypedDict):
     action: Literal["click"]
     x: int
     y: int
     description: str
+
+
+class VisionClickAction(_VisionClickActionRequired, VisionActionMetadata):
+    pass
 
 
 class VisionWaitAction(TypedDict):
@@ -343,27 +420,43 @@ class VisionWaitAction(TypedDict):
     description: str
 
 
-class VisionClickStep(TypedDict):
+class _VisionClickStepRequired(TypedDict):
     type: Literal["click"]
     x: int
     y: int
     description: str
 
 
-class VisionStepsAction(TypedDict):
+class VisionClickStep(_VisionClickStepRequired, VisionActionMetadata):
+    pass
+
+
+class _VisionStepsActionRequired(TypedDict):
     action: Literal["steps"]
     steps: List[Union[VisionClickStep, VisionWaitAction]]
     description: str
 
 
-class VisionNotFoundAction(TypedDict):
+class VisionStepsAction(_VisionStepsActionRequired, VisionActionMetadata):
+    pass
+
+
+class _VisionNotFoundActionRequired(TypedDict):
     action: Literal["not_found"]
     description: str
 
 
-class VisionNoopAction(TypedDict):
+class VisionNotFoundAction(_VisionNotFoundActionRequired, VisionActionMetadata):
+    pass
+
+
+class _VisionNoopActionRequired(TypedDict):
     action: Literal["noop"]
     description: str
+
+
+class VisionNoopAction(_VisionNoopActionRequired, VisionActionMetadata):
+    pass
 
 
 VisionActionOutput = Union[
@@ -421,6 +514,7 @@ WORKFLOW_STEP_RESPONSE_JSON_SCHEMA = {
                 "keypress",
                 "type_text",
                 "wait",
+                "wait_for_state",
                 "vision",
                 "say",
             ],
@@ -444,6 +538,12 @@ WORKFLOW_STEP_RESPONSE_JSON_SCHEMA = {
         "option": {"type": "boolean"},
         "text": {"type": "string", "minLength": 1},
         "seconds": {"type": "number", "minimum": 0.1, "maximum": 10.0},
+        "condition": {"type": "string", "enum": sorted(WAIT_FOR_STATE_CONDITIONS)},
+        "label": {"type": "string", "minLength": 1},
+        "role": {"type": "string", "minLength": 1},
+        "substring": {"type": "string", "minLength": 1},
+        "timeout_seconds": {"type": "number", "minimum": 0.1, "maximum": 10.0},
+        "poll_interval": {"type": "number", "minimum": 0.1, "maximum": 1.0},
         "task": {"type": "string", "minLength": 5},
     },
     "required": ["type", "reason"],
@@ -485,6 +585,10 @@ VISION_ACTION_RESPONSE_JSON_SCHEMA = {
         "x": {"type": "integer", "minimum": 0},
         "y": {"type": "integer", "minimum": 0},
         "description": {"type": "string", "minLength": 1, "maxLength": 120},
+        "target_label": {"type": "string", "minLength": 1, "maxLength": 120},
+        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+        "rationale": {"type": "string", "minLength": 3, "maxLength": 240},
+        "expected_postcondition": {"type": "string", "minLength": 3, "maxLength": 240},
         "steps": {
             "type": "array",
             "minItems": 1,
@@ -497,6 +601,10 @@ VISION_ACTION_RESPONSE_JSON_SCHEMA = {
                     "y": {"type": "integer", "minimum": 0},
                     "seconds": {"type": "number", "minimum": 0.1, "maximum": 5.0},
                     "description": {"type": "string", "minLength": 1, "maxLength": 120},
+                    "target_label": {"type": "string", "minLength": 1, "maxLength": 120},
+                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                    "rationale": {"type": "string", "minLength": 3, "maxLength": 240},
+                    "expected_postcondition": {"type": "string", "minLength": 3, "maxLength": 240},
                 },
                 "required": ["type", "description"],
                 "additionalProperties": False,
@@ -504,6 +612,17 @@ VISION_ACTION_RESPONSE_JSON_SCHEMA = {
         },
     },
     "required": ["action", "description"],
+    "additionalProperties": False,
+}
+
+
+VISION_POSTCONDITION_RESPONSE_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "satisfied": {"type": "boolean"},
+        "reason": {"type": "string", "minLength": 1, "maxLength": 160},
+    },
+    "required": ["satisfied", "reason"],
     "additionalProperties": False,
 }
 
@@ -653,6 +772,22 @@ WORKFLOW_PLANNER_OUTPUT_SCHEMA = {
                             "reason": {"type": "string", "minLength": 3, "maxLength": 60},
                         },
                         "required": ["type", "seconds", "reason"],
+                        "additionalProperties": False,
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "type": {"const": "wait_for_state"},
+                            "condition": {"type": "string", "enum": sorted(WAIT_FOR_STATE_CONDITIONS)},
+                            "app": {"type": "string", "minLength": 1},
+                            "label": {"type": "string", "minLength": 1},
+                            "role": {"type": "string", "minLength": 1},
+                            "substring": {"type": "string", "minLength": 1},
+                            "timeout_seconds": {"type": "number", "minimum": 0.1, "maximum": 10.0},
+                            "poll_interval": {"type": "number", "minimum": 0.1, "maximum": 1.0},
+                            "reason": {"type": "string", "minLength": 3, "maxLength": 60},
+                        },
+                        "required": ["type", "condition", "reason"],
                         "additionalProperties": False,
                     },
                     {
@@ -1680,6 +1815,498 @@ def infer_target_app_name(text):
     return ""
 
 
+def _run_ax_query_json(query_name, jxa_script, argv, timeout_seconds=AX_QUERY_TIMEOUT_SECONDS):
+    """Run a bounded JXA accessibility query and return parsed JSON."""
+    args = [str(item) for item in argv]
+    debug_event("ax_query_start", query=query_name, args=args, timeout_seconds=timeout_seconds)
+    try:
+        result = subprocess.run(
+            ["osascript", "-l", "JavaScript", "-e", jxa_script, *args],
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired:
+        debug_event("ax_query_timeout", query=query_name, args=args, timeout_seconds=timeout_seconds)
+        return None
+
+    if result.returncode != 0:
+        debug_event(
+            "ax_query_error",
+            query=query_name,
+            args=args,
+            timeout_seconds=timeout_seconds,
+            error=result.stderr.strip() or f"osascript exited {result.returncode}",
+        )
+        return None
+
+    stdout = result.stdout.strip()
+    if not stdout:
+        debug_event("ax_query_result", query=query_name, args=args, timeout_seconds=timeout_seconds, empty=True)
+        return None
+
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        debug_event(
+            "ax_query_error",
+            query=query_name,
+            args=args,
+            timeout_seconds=timeout_seconds,
+            error=f"invalid json: {exc}",
+            stdout=stdout[:500],
+        )
+        return None
+
+    summary = {"query": query_name, "args": args, "timeout_seconds": timeout_seconds}
+    if isinstance(payload, dict):
+        summary["status"] = payload.get("status", "ok")
+        if isinstance(payload.get("matches"), list):
+            summary["match_count"] = len(payload["matches"])
+        if "visited" in payload:
+            summary["visited"] = payload.get("visited")
+    debug_event("ax_query_result", **summary)
+    return payload
+
+
+def extract_first_quoted_text(text):
+    """Return the first quoted span in a task description, if present."""
+    if not isinstance(text, str):
+        return ""
+    for pattern in (r'"([^"]+)"', r"'([^']+)'"):
+        match = re.search(pattern, text)
+        if match and match.group(1).strip():
+            return match.group(1).strip()
+    return ""
+
+
+def extract_target_label_from_text(text):
+    """Best-effort extraction of a human-visible label from a task description."""
+    quoted = extract_first_quoted_text(text)
+    if quoted:
+        return quoted
+    normalized = strip_request_wrappers(text or "")
+    if not normalized:
+        return ""
+    patterns = (
+        r"\b(?:labeled|labelled|named|called)\s+(.+)$",
+        r"^click(?:\s+on)?\s+(.+)$",
+        r"^select\s+(.+)$",
+        r"^open\s+(.+)$",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, normalized)
+        if not match:
+            continue
+        label = match.group(1).strip(" .")
+        label = re.split(r"\b(?:if|when|that|which)\b", label, maxsplit=1)[0].strip(" .")
+        if label:
+            return label
+    return ""
+
+
+def extract_target_role_from_text(text):
+    """Infer a likely accessibility role hint from the task wording."""
+    normalized = strip_request_wrappers(text or "")
+    if not normalized:
+        return ""
+    for keyword, role in AX_ROLE_KEYWORDS.items():
+        if re.search(rf"\b{re.escape(keyword)}\b", normalized):
+            return role
+    return ""
+
+
+def query_ax_element(app_name, target_label="", target_role="", max_depth=5, max_results=10):
+    """Query the app accessibility tree for matching elements, bounded by depth and results."""
+    resolved_app = resolve_generic_app_name(app_name) if app_name else ""
+    if not resolved_app:
+        return []
+
+    bounded_depth = max(1, min(int(max_depth), AX_QUERY_MAX_DEPTH))
+    bounded_results = max(1, min(int(max_results), AX_QUERY_MAX_RESULTS))
+    bounded_children = max(1, AX_QUERY_MAX_CHILDREN)
+    label_hint = (target_label or "").strip()
+    role_hint = (target_role or "").strip()
+    jxa_script = """
+function run(argv) {
+  var appName = argv[0] || "";
+  var targetLabel = (argv[1] || "").toLowerCase();
+  var targetRole = (argv[2] || "").toLowerCase();
+  var maxDepth = Math.max(1, parseInt(argv[3] || "5", 10));
+  var maxResults = Math.max(1, parseInt(argv[4] || "10", 10));
+  var maxChildren = Math.max(1, parseInt(argv[5] || "40", 10));
+  var maxVisited = Math.max(maxResults * maxChildren * (maxDepth + 1), maxResults * 4);
+  var systemEvents = Application("System Events");
+  var process = systemEvents.processes.byName(appName);
+  if (!process.exists()) {
+    return JSON.stringify({status: "missing_process", matches: [], visited: 0});
+  }
+
+  function safeCall(fn, fallback) {
+    try {
+      var value = fn();
+      if (value === undefined || value === null) return fallback;
+      return value;
+    } catch (e) {
+      return fallback;
+    }
+  }
+
+  function asList(value) {
+    if (!value) return [];
+    if (value instanceof Array) return value;
+    var items = [];
+    try {
+      var length = value.length || 0;
+      for (var index = 0; index < length; index += 1) {
+        items.push(value[index]);
+      }
+    } catch (e) {}
+    return items;
+  }
+
+  function safeList(fn) {
+    return asList(safeCall(fn, []));
+  }
+
+  function scalar(value) {
+    if (value === undefined || value === null) return "";
+    if (value instanceof Array) {
+      var pieces = [];
+      for (var index = 0; index < value.length; index += 1) {
+        pieces.push(String(value[index]));
+      }
+      return pieces.join(" ");
+    }
+    return String(value);
+  }
+
+  function maybeNumber(value) {
+    var number = Number(value);
+    return isFinite(number) ? number : null;
+  }
+
+  function normalize(value) {
+    return scalar(value).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  }
+
+  function describe(element, depth) {
+    var name = scalar(safeCall(function() { return element.name(); }, ""));
+    var description = scalar(safeCall(function() { return element.description(); }, ""));
+    var role = scalar(safeCall(function() { return element.role(); }, ""));
+    var subrole = scalar(safeCall(function() { return element.subrole(); }, ""));
+    var value = scalar(safeCall(function() { return element.value(); }, ""));
+    var position = safeCall(function() { return element.position(); }, null);
+    var size = safeCall(function() { return element.size(); }, null);
+    var x = position && position.length > 1 ? maybeNumber(position[0]) : null;
+    var y = position && position.length > 1 ? maybeNumber(position[1]) : null;
+    var width = size && size.length > 1 ? maybeNumber(size[0]) : null;
+    var height = size && size.length > 1 ? maybeNumber(size[1]) : null;
+    return {
+      label: name || description || value,
+      description: description,
+      role: role,
+      subrole: subrole,
+      value: value,
+      x: x,
+      y: y,
+      width: width,
+      height: height,
+      depth: depth
+    };
+  }
+
+  function matchesTarget(info) {
+    var roleText = normalize(info.role + " " + info.subrole);
+    if (targetRole && roleText.indexOf(targetRole) === -1) {
+      return false;
+    }
+    if (!targetLabel) {
+      return !!targetRole;
+    }
+    var labelText = normalize(info.label + " " + info.description + " " + info.value);
+    return labelText.indexOf(targetLabel) !== -1;
+  }
+
+  function childrenOf(element) {
+    var rawChildren = safeList(function() { return element.uiElements(); });
+    var children = [];
+    for (var index = 0; index < rawChildren.length && index < maxChildren; index += 1) {
+      children.push(rawChildren[index]);
+    }
+    return children;
+  }
+
+  var roots = safeList(function() { return process.windows(); });
+  if (!roots.length) {
+    roots = childrenOf(process);
+  }
+
+  var matches = [];
+  var visited = 0;
+
+  function walk(element, depth) {
+    if (!element || visited >= maxVisited || matches.length >= maxResults || depth > maxDepth) {
+      return;
+    }
+    visited += 1;
+    var info = describe(element, depth);
+    if (matchesTarget(info)) {
+      matches.push(info);
+      if (matches.length >= maxResults) {
+        return;
+      }
+    }
+    if (depth >= maxDepth) {
+      return;
+    }
+    var children = childrenOf(element);
+    for (var index = 0; index < children.length; index += 1) {
+      if (matches.length >= maxResults || visited >= maxVisited) {
+        break;
+      }
+      walk(children[index], depth + 1);
+    }
+  }
+
+  for (var rootIndex = 0; rootIndex < roots.length; rootIndex += 1) {
+    if (matches.length >= maxResults || visited >= maxVisited) {
+      break;
+    }
+    walk(roots[rootIndex], 0);
+  }
+
+  return JSON.stringify({status: "ok", matches: matches, visited: visited});
+}
+"""
+    payload = _run_ax_query_json(
+        "element",
+        jxa_script,
+        [resolved_app, label_hint.lower(), role_hint.lower(), bounded_depth, bounded_results, bounded_children],
+    )
+    if payload is None:
+        return None
+
+    normalized_matches = []
+    for raw_match in payload.get("matches", []):
+        if not isinstance(raw_match, dict):
+            continue
+        x = raw_match.get("x")
+        y = raw_match.get("y")
+        width = raw_match.get("width")
+        height = raw_match.get("height")
+        match = {
+            "label": str(raw_match.get("label", "")).strip(),
+            "description": str(raw_match.get("description", "")).strip(),
+            "role": str(raw_match.get("role", "")).strip(),
+            "subrole": str(raw_match.get("subrole", "")).strip(),
+            "value": str(raw_match.get("value", "")).strip(),
+            "x": x,
+            "y": y,
+            "width": width,
+            "height": height,
+            "depth": int(raw_match.get("depth", 0) or 0),
+        }
+        if all(isinstance(value, (int, float)) for value in (x, y, width, height)):
+            match["center_x"] = int(round(float(x) + (float(width) / 2.0)))
+            match["center_y"] = int(round(float(y) + (float(height) / 2.0)))
+        normalized_matches.append(match)
+    return normalized_matches
+
+
+def ax_check_app_frontmost(app_name):
+    """Return True when the named app is frontmost, False when not, and None on AX failure."""
+    resolved_app = resolve_generic_app_name(app_name) if app_name else ""
+    if not resolved_app:
+        return False
+    payload = _run_ax_query_json(
+        "frontmost",
+        """
+function run(argv) {
+  var appName = argv[0] || "";
+  var systemEvents = Application("System Events");
+  var process = systemEvents.processes.byName(appName);
+  if (!process.exists()) return JSON.stringify({status: "missing_process", frontmost: false});
+  try {
+    return JSON.stringify({status: "ok", frontmost: !!process.frontmost()});
+  } catch (e) {
+    return JSON.stringify({status: "ok", frontmost: false});
+  }
+}
+""",
+        [resolved_app],
+    )
+    if payload is None:
+        return None
+    return bool(payload.get("frontmost", False))
+
+
+def ax_get_window_count(app_name):
+    """Return the number of app windows, or None when AX is unavailable."""
+    resolved_app = resolve_generic_app_name(app_name) if app_name else ""
+    if not resolved_app:
+        return 0
+    payload = _run_ax_query_json(
+        "window_count",
+        """
+function run(argv) {
+  var appName = argv[0] || "";
+  var systemEvents = Application("System Events");
+  var process = systemEvents.processes.byName(appName);
+  if (!process.exists()) return JSON.stringify({status: "missing_process", count: 0});
+  var count = 0;
+  try {
+    count = process.windows().length;
+  } catch (e) {
+    count = 0;
+  }
+  return JSON.stringify({status: "ok", count: count});
+}
+""",
+        [resolved_app],
+    )
+    if payload is None:
+        return None
+    try:
+        return int(payload.get("count", 0))
+    except (TypeError, ValueError):
+        return None
+
+
+def ax_get_focused_element_value(app_name):
+    """Return the focused AX element value when readable, else None."""
+    resolved_app = resolve_generic_app_name(app_name) if app_name else ""
+    if not resolved_app:
+        return ""
+    payload = _run_ax_query_json(
+        "focused_value",
+        """
+function run(argv) {
+  var appName = argv[0] || "";
+  var systemEvents = Application("System Events");
+  var process = systemEvents.processes.byName(appName);
+  if (!process.exists()) return JSON.stringify({status: "missing_process", value: ""});
+  try {
+    var focused = process.focusedUIElement();
+    var value = focused ? focused.value() : "";
+    if (value instanceof Array) {
+      value = value.join(" ");
+    }
+    return JSON.stringify({status: "ok", value: value === undefined || value === null ? "" : String(value)});
+  } catch (e) {
+    return JSON.stringify({status: "ok", value: ""});
+  }
+}
+""",
+        [resolved_app],
+    )
+    if payload is None:
+        return None
+    return str(payload.get("value", ""))
+
+
+def wait_for_state(condition_fn, timeout_seconds=5.0, poll_interval=0.3, condition_name=""):
+    """Poll a condition function until it succeeds or the timeout expires."""
+    timeout_seconds = max(0.1, float(timeout_seconds or WAIT_FOR_STATE_DEFAULT_TIMEOUT_SECONDS))
+    poll_interval = min(
+        WAIT_FOR_STATE_MAX_POLL_INTERVAL,
+        max(WAIT_FOR_STATE_MIN_POLL_INTERVAL, float(poll_interval or WAIT_FOR_STATE_DEFAULT_POLL_INTERVAL)),
+    )
+    deadline = time.monotonic() + timeout_seconds
+    attempts = 0
+    debug_event(
+        "wait_for_state_start",
+        condition=condition_name or "unnamed_condition",
+        timeout_seconds=timeout_seconds,
+        poll_interval=poll_interval,
+    )
+    while True:
+        attempts += 1
+        try:
+            if condition_fn():
+                debug_event(
+                    "wait_for_state_satisfied",
+                    condition=condition_name or "unnamed_condition",
+                    attempts=attempts,
+                )
+                return True
+        except Exception as exc:
+            debug_event(
+                "wait_for_state_condition_error",
+                condition=condition_name or "unnamed_condition",
+                attempts=attempts,
+                error=str(exc),
+            )
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(poll_interval, remaining))
+    debug_event(
+        "wait_for_state_timeout",
+        condition=condition_name or "unnamed_condition",
+        attempts=attempts,
+        timeout_seconds=timeout_seconds,
+    )
+    return False
+
+
+def condition_app_frontmost(app_name):
+    """Build a wait predicate that succeeds when the app is frontmost."""
+    return lambda: ax_check_app_frontmost(app_name) is True
+
+
+def condition_window_exists(app_name):
+    """Build a wait predicate that succeeds when the app has at least one window."""
+    return lambda: (ax_get_window_count(app_name) or 0) > 0
+
+
+def condition_element_exists(app_name, label, role):
+    """Build a wait predicate that succeeds when a named AX element exists."""
+    return lambda: bool(query_ax_element(app_name, target_label=label, target_role=role, max_results=1) or [])
+
+
+def condition_element_value_contains(app_name, substring):
+    """Build a wait predicate that succeeds when the focused AX value contains a substring."""
+    needle = (substring or "").strip().lower()
+    return lambda: needle in (ax_get_focused_element_value(app_name) or "").lower()
+
+
+def build_wait_for_state_condition(step):
+    """Construct the executable predicate for a wait_for_state workflow step."""
+    condition = step.get("condition", "").strip().lower()
+    app_name = step.get("app", "").strip()
+    label = step.get("label", "").strip()
+    role = step.get("role", "").strip()
+    substring = step.get("substring", "").strip()
+    if condition == "app_frontmost":
+        return condition_app_frontmost(app_name), f"app_frontmost:{app_name}"
+    if condition == "window_exists":
+        return condition_window_exists(app_name), f"window_exists:{app_name}"
+    if condition == "element_exists":
+        return condition_element_exists(app_name, label, role), f"element_exists:{app_name}:{label or role}"
+    if condition == "element_value_contains":
+        return condition_element_value_contains(app_name, substring), f"element_value_contains:{app_name}:{substring}"
+    raise ValueError(f"Unsupported wait_for_state condition: {condition}")
+
+
+def should_use_accessibility(app_name, target_description):
+    """Use accessibility first for standard macOS apps and standard controls."""
+    resolved_app = resolve_generic_app_name(app_name) if app_name else ""
+    if not resolved_app:
+        return False
+    if resolved_app in AX_AVOID_APPS:
+        return False
+    if resolved_app in AX_PREFERRED_APPS:
+        return True
+    normalized = strip_request_wrappers(target_description or "")
+    if any(
+        word in normalized
+        for word in ("video", "thumbnail", "album", "playlist", "song", "timeline", "canvas", "editor")
+    ):
+        return False
+    return bool(extract_target_role_from_text(target_description))
+
+
 # ===========================================================================
 # GEMINI / LLM FALLBACK
 # ===========================================================================
@@ -1810,6 +2437,34 @@ def parse_structured_json_response(text):
         ) from exc
 
 
+def _normalize_optional_vision_fields(payload):
+    """Normalize optional metadata added to vision click payloads."""
+    normalized = {}
+    target_label = payload.get("target_label")
+    if isinstance(target_label, str) and target_label.strip():
+        normalized["target_label"] = target_label.strip()
+    if "confidence" in payload and payload.get("confidence") is not None:
+        normalized["confidence"] = float(payload["confidence"])
+    rationale = payload.get("rationale")
+    if isinstance(rationale, str) and rationale.strip():
+        normalized["rationale"] = rationale.strip()
+    expected_postcondition = payload.get("expected_postcondition")
+    if isinstance(expected_postcondition, str) and expected_postcondition.strip():
+        normalized["expected_postcondition"] = expected_postcondition.strip()
+    return normalized
+
+
+def validate_postcondition_verification_output(result):
+    """Validate the optional post-click verification response."""
+    if not isinstance(result, dict):
+        raise PlannerValidationError("vision_verify: payload must be a JSON object")
+    validate_json_schema(result, VISION_POSTCONDITION_RESPONSE_JSON_SCHEMA, "vision_verify")
+    return {
+        "satisfied": bool(result["satisfied"]),
+        "reason": result["reason"].strip(),
+    }
+
+
 def validate_vision_action_output(result):
     """Validate and normalize a structured vision action payload."""
     if not isinstance(result, dict):
@@ -1821,12 +2476,14 @@ def validate_vision_action_output(result):
     if action == "click":
         if "x" not in result or "y" not in result:
             raise PlannerValidationError("vision: click requires x and y")
-        return {
+        normalized = {
             "action": "click",
             "x": int(result["x"]),
             "y": int(result["y"]),
             "description": result["description"].strip(),
         }
+        normalized.update(_normalize_optional_vision_fields(result))
+        return normalized
 
     if action == "steps":
         steps = result.get("steps")
@@ -1838,12 +2495,14 @@ def validate_vision_action_output(result):
             if step_type == "click":
                 if "x" not in step or "y" not in step:
                     raise PlannerValidationError(f"vision: step {index} click requires x and y")
-                normalized_steps.append({
+                normalized_step = {
                     "type": "click",
                     "x": int(step["x"]),
                     "y": int(step["y"]),
                     "description": step["description"].strip(),
-                })
+                }
+                normalized_step.update(_normalize_optional_vision_fields(step))
+                normalized_steps.append(normalized_step)
             elif step_type == "wait":
                 if "seconds" not in step:
                     raise PlannerValidationError(f"vision: step {index} wait requires seconds")
@@ -1854,17 +2513,21 @@ def validate_vision_action_output(result):
                 })
             else:
                 raise PlannerValidationError(f'vision: step {index} has invalid type "{step_type}"')
-        return {
+        normalized = {
             "action": "steps",
             "steps": normalized_steps,
             "description": result["description"].strip(),
         }
+        normalized.update(_normalize_optional_vision_fields(result))
+        return normalized
 
     if action in {"not_found", "noop"}:
-        return {
+        normalized = {
             "action": action,
             "description": result["description"].strip(),
         }
+        normalized.update(_normalize_optional_vision_fields(result))
+        return normalized
 
     raise PlannerValidationError(f'vision: invalid action "{action}"')
 
@@ -2335,118 +2998,438 @@ $.CGEventPost($.kCGHIDEventTap, up);
     subprocess.run(["osascript", "-l", "JavaScript", "-e", jxa_script], check=True)
 
 
-def execute_vision_task(task, transcript):
-    """Take a screenshot, ask Gemini to analyze it, and perform the action."""
-    say("Let me look at the screen")
-
-    target_app = infer_target_app_name(f"{task} {transcript}")
+def capture_vision_frame(target_app, debug_prefix="vision"):
+    """Capture a fresh screenshot for a vision step, preferring the target app window."""
     screenshot_region = None
     if target_app:
         try:
             screenshot_region = get_app_window_bounds(target_app)
             debug_event("vision_target_window", app=target_app, region=screenshot_region)
-        except Exception as e:
-            debug_event("vision_target_window_failed", app=target_app, error=str(e))
+        except Exception as exc:
+            debug_event("vision_target_window_failed", app=target_app, error=str(exc))
 
-    try:
-        image_bytes, metadata = capture_screenshot(region=screenshot_region)
-    except Exception as e:
-        print(f"  !! Screenshot failed: {e}")
-        debug_event("screenshot_error", error=str(e))
-        say("I couldn't capture the screen")
-        return False
-
+    image_bytes, metadata = capture_screenshot(region=screenshot_region)
     screenshot_path = None
     if SAVE_VISION_DEBUG:
         try:
-            screenshot_path = save_debug_screenshot(image_bytes, "vision")
-        except Exception as e:
-            debug_event("vision_debug_save_failed", error=str(e))
+            screenshot_path = save_debug_screenshot(image_bytes, debug_prefix)
+        except Exception as exc:
+            debug_event("vision_debug_save_failed", error=str(exc))
 
+    metadata = dict(metadata)
+    metadata["coordinate_space"] = "image"
+    metadata["screenshot_region"] = screenshot_region
+    metadata["screenshot_path"] = screenshot_path
+    return image_bytes, metadata
+
+
+def request_vision_action(task, transcript, target_app, image_bytes, metadata):
+    """Ask Gemini to resolve a vision task against a fresh screenshot."""
     prompt = (
         f'The user said: "{transcript}". Task: {task}\n'
         f'You are looking at a screenshot that is {metadata["pixel_width"]}x{metadata["pixel_height"]} pixels.\n'
         f'This screenshot represents the logical screen region x={metadata["region_x"]}, y={metadata["region_y"]}, '
         f'width={metadata["logical_width"]}, height={metadata["logical_height"]}.\n'
         f'The target app is: {target_app or "unknown"}.\n'
-        "Return click coordinates relative to this screenshot image in image pixel space, not global screen space."
+        "Return click coordinates relative to this screenshot image in image pixel space, not global screen space.\n"
+        "For click actions, include target_label when possible, a confidence from 0.0 to 1.0, a short rationale, "
+        "and an expected_postcondition when a successful click should change the UI.\n"
+        "If confidence would be below 0.6, return not_found instead of an unsafe click."
     )
-    try:
-        result = call_gemini_structured(
-            system_instruction="""You are Biggie, a voice-controlled macOS assistant helping with a screen task.
+    return call_gemini_structured(
+        system_instruction="""You are Biggie, a voice-controlled macOS assistant helping with a screen task.
 
 Return ONLY the vision action object that matches the configured response schema.
 Coordinates must be relative to the screenshot image itself, not global screen space.
 Prefer targets inside the referenced app/window, not Terminal or editor chrome.
 If multiple matches exist, choose the one most consistent with the target app and the user's request.
-Use `noop` when the task is already satisfied and `not_found` when the target cannot be identified.""",
-            user_text=prompt,
-            response_json_schema=VISION_ACTION_RESPONSE_JSON_SCHEMA,
-            validator=validate_vision_action_output,
+Use `noop` when the task is already satisfied and `not_found` when the target cannot be identified.
+Only return `click` when the target is specific enough to act on safely.""",
+        user_text=prompt,
+        response_json_schema=VISION_ACTION_RESPONSE_JSON_SCHEMA,
+        validator=validate_vision_action_output,
+        preferred_models=model_candidates(GEMINI_VISION_MODEL, "gemini-2.5-flash", GEMINI_MODEL),
+        call_type="vision",
+        max_output_tokens=500,
+        timeout_seconds=WORKFLOW_PLANNER_TIMEOUT_SECONDS,
+        image_bytes=image_bytes,
+        trace_context={
+            "transcript": transcript,
+            "task": task,
+            "target_app": target_app,
+            "metadata": metadata,
+            "screenshot_path": metadata.get("screenshot_path"),
+        },
+    )
+
+
+def resolve_click_coordinates(action, metadata):
+    """Resolve action coordinates explicitly based on their declared coordinate space."""
+    coordinate_space = metadata.get("coordinate_space", "image")
+    if coordinate_space == "global":
+        return int(action["x"]), int(action["y"])
+    if coordinate_space == "image":
+        return image_to_global_coordinates(int(action["x"]), int(action["y"]), metadata)
+    raise ValueError(f"Unsupported coordinate space: {coordinate_space}")
+
+
+def _ax_verify_postcondition(postcondition, app_name, original_metadata):
+    """Try to verify a click postcondition using accessibility data alone."""
+    if not postcondition or not app_name:
+        return {"status": "impossible", "reason": "No AX-verifiable postcondition available", "method": "ax"}
+
+    target_label = (
+        extract_target_label_from_text(postcondition)
+        or original_metadata.get("target_label", "")
+        or original_metadata.get("label", "")
+    )
+    target_role = extract_target_role_from_text(postcondition) or original_metadata.get("target_role", "")
+    if target_label:
+        matches = query_ax_element(app_name, target_label=target_label, target_role=target_role, max_results=1)
+        if matches is None:
+            return {"status": "unavailable", "reason": "AX element query unavailable", "method": "ax"}
+        if matches:
+            return {
+                "status": "verified",
+                "reason": f'AX element "{target_label}" is present',
+                "method": "ax",
+            }
+        return {
+            "status": "unverified",
+            "reason": f'AX element "{target_label}" not found',
+            "method": "ax",
+        }
+
+    normalized = strip_request_wrappers(postcondition)
+    if any(word in normalized for word in ("window", "dialog", "sheet", "panel", "popover", "menu")):
+        before = original_metadata.get("window_count_before")
+        after = ax_get_window_count(app_name)
+        if after is None:
+            return {"status": "unavailable", "reason": "AX window count unavailable", "method": "ax"}
+        if isinstance(before, int):
+            if after > before:
+                return {"status": "verified", "reason": "AX window count increased", "method": "ax"}
+            if any(word in normalized for word in ("close", "dismiss")) and after < before:
+                return {"status": "verified", "reason": "AX window count decreased", "method": "ax"}
+            return {"status": "unverified", "reason": "AX window count did not change", "method": "ax"}
+
+    quoted = extract_first_quoted_text(postcondition)
+    if quoted and any(word in normalized for word in ("contain", "contains", "show", "shows", "value", "text")):
+        focused_value = ax_get_focused_element_value(app_name)
+        if focused_value is None:
+            return {"status": "unavailable", "reason": "AX focused value unavailable", "method": "ax"}
+        if quoted.lower() in focused_value.lower():
+            return {"status": "verified", "reason": "Focused AX value contains expected text", "method": "ax"}
+        return {"status": "unverified", "reason": "Focused AX value missing expected text", "method": "ax"}
+
+    return {"status": "impossible", "reason": "No AX verification heuristic matched", "method": "ax"}
+
+
+def verify_postcondition(postcondition, app_name, original_metadata):
+    """Verify a click postcondition, preferring AX and falling back to one Gemini check."""
+    ax_result = _ax_verify_postcondition(postcondition, app_name, original_metadata)
+    if ax_result["status"] in {"verified", "unverified"}:
+        ax_result["used_gemini"] = False
+        return ax_result
+
+    allow_gemini = bool(original_metadata.get("allow_gemini_verification", True))
+    if not postcondition:
+        return {
+            "status": "unavailable",
+            "reason": "No postcondition was provided",
+            "method": "none",
+            "used_gemini": False,
+        }
+    if not allow_gemini:
+        return {
+            "status": "unverified",
+            "reason": "Gemini verification budget exhausted",
+            "method": "none",
+            "used_gemini": False,
+        }
+    if not GEMINI_API_KEY:
+        return {
+            "status": "unavailable",
+            "reason": "Gemini verification unavailable",
+            "method": "none",
+            "used_gemini": False,
+        }
+
+    try:
+        image_bytes, metadata = capture_vision_frame(app_name, debug_prefix="vision_verify")
+    except Exception as exc:
+        debug_event("screenshot_error", error=str(exc), phase="vision_verify")
+        return {
+            "status": "unavailable",
+            "reason": f"Verification screenshot unavailable: {exc}",
+            "method": "gemini",
+            "used_gemini": False,
+        }
+
+    verification_prompt = (
+        f'The user originally asked: "{original_metadata.get("transcript", "")}".\n'
+        f'The executed task was: {original_metadata.get("task", "")}\n'
+        f'The click description was: {original_metadata.get("description", "")}\n'
+        f'The target app is: {app_name or "unknown"}.\n'
+        f'Expected postcondition: {postcondition}\n'
+        f'Visible target label before the click, if known: {original_metadata.get("target_label", "")}\n'
+        f'The screenshot is {metadata["pixel_width"]}x{metadata["pixel_height"]} pixels representing '
+        f'x={metadata["region_x"]}, y={metadata["region_y"]}, width={metadata["logical_width"]}, '
+        f'height={metadata["logical_height"]}.'
+    )
+
+    try:
+        result = call_gemini_structured(
+            system_instruction="""You are verifying whether a UI postcondition is satisfied after a click.
+
+Return ONLY the verification object matching the configured response schema.
+Mark satisfied=true only when the screenshot clearly shows the requested postcondition.""",
+            user_text=verification_prompt,
+            response_json_schema=VISION_POSTCONDITION_RESPONSE_JSON_SCHEMA,
+            validator=validate_postcondition_verification_output,
             preferred_models=model_candidates(GEMINI_VISION_MODEL, "gemini-2.5-flash", GEMINI_MODEL),
-            call_type="vision",
-            max_output_tokens=500,
-            timeout_seconds=WORKFLOW_PLANNER_TIMEOUT_SECONDS,
+            call_type="vision_verify",
+            max_output_tokens=120,
+            timeout_seconds=VISION_VERIFICATION_TIMEOUT_SECONDS,
             image_bytes=image_bytes,
             trace_context={
-                "transcript": transcript,
-                "task": task,
-                "target_app": target_app,
-                "metadata": metadata,
-                "screenshot_path": screenshot_path,
+                "transcript": original_metadata.get("transcript", ""),
+                "task": original_metadata.get("task", ""),
+                "target_app": app_name,
+                "postcondition": postcondition,
+                "screenshot_path": metadata.get("screenshot_path"),
             },
         )
-        debug_event("vision_response", response=result, metadata=metadata, target_app=target_app)
-    except StructuredOutputError as exc:
-        planner_failure(
-            "vision",
-            exc.category,
-            transcript=transcript,
-            task=task,
-            error=str(exc),
-            model=exc.model,
-            attempt=exc.attempt,
-            correlation_id=exc.correlation_id,
-            raw_response=exc.raw_response,
+    except Exception as exc:
+        debug_event("vision_verify_unavailable", error=str(exc), target_app=app_name, postcondition=postcondition)
+        return {
+            "status": "unavailable",
+            "reason": f"Gemini verification unavailable: {exc}",
+            "method": "gemini",
+            "used_gemini": True,
+        }
+
+    return {
+        "status": "verified" if result["satisfied"] else "unverified",
+        "reason": result["reason"],
+        "method": "gemini",
+        "used_gemini": True,
+    }
+
+
+def resolve_ui_target(app_name, target_description, transcript):
+    """Resolve a UI target with AX first when appropriate, then fall back to screenshot vision."""
+    target_app = resolve_generic_app_name(app_name) if app_name else ""
+    target_label = extract_target_label_from_text(target_description) or extract_target_label_from_text(transcript)
+    target_role = extract_target_role_from_text(target_description)
+    original_metadata = {
+        "target_app": target_app,
+        "task": target_description,
+        "transcript": transcript,
+        "target_label": target_label,
+        "target_role": target_role,
+        "window_count_before": ax_get_window_count(target_app) if target_app else None,
+        "focused_value_before": ax_get_focused_element_value(target_app) if target_app else None,
+    }
+
+    if should_use_accessibility(target_app, target_description) and (target_label or target_role):
+        ax_matches = query_ax_element(
+            target_app,
+            target_label=target_label,
+            target_role=target_role,
+            max_depth=AX_QUERY_MAX_DEPTH,
+            max_results=1,
         )
-        print(f"  !! Vision returned invalid structured output: {exc}")
-        say("I couldn't figure out where to click")
-        return False
+        if ax_matches:
+            first_match = ax_matches[0]
+            if "center_x" in first_match and "center_y" in first_match:
+                action = {
+                    "action": "click",
+                    "x": int(first_match["center_x"]),
+                    "y": int(first_match["center_y"]),
+                    "description": f'Click {first_match.get("label") or target_label or "target"}',
+                    "target_label": first_match.get("label") or target_label or "",
+                    "confidence": 1.0,
+                    "rationale": "Resolved via macOS accessibility",
+                }
+                debug_event(
+                    "vision_ax_resolved",
+                    target_app=target_app,
+                    target_label=target_label,
+                    target_role=target_role,
+                    match=first_match,
+                )
+                return {
+                    "source": "ax",
+                    "target_app": target_app,
+                    "action": action,
+                    "metadata": {
+                        **original_metadata,
+                        "coordinate_space": "global",
+                        "ax_match": first_match,
+                    },
+                }
+        debug_event("vision_ax_miss", target_app=target_app, target_label=target_label, target_role=target_role)
 
-    action = result.get("action")
+    image_bytes, metadata = capture_vision_frame(target_app, debug_prefix="vision")
+    metadata = {
+        **original_metadata,
+        **metadata,
+    }
+    result = request_vision_action(target_description, transcript, target_app, image_bytes, metadata)
+    debug_event("vision_response", response=result, metadata=metadata, target_app=target_app)
+    return {
+        "source": "vision",
+        "target_app": target_app,
+        "action": result,
+        "metadata": metadata,
+    }
 
-    if action == "click":
-        image_x, image_y = int(result["x"]), int(result["y"])
-        x, y = image_to_global_coordinates(image_x, image_y, metadata)
-        desc = result.get("description", f"Clicking at ({x}, {y})")
-        print(f"  [eye] Vision: {desc}")
-        say(desc)
-        click_at(x, y)
-        log_command(transcript, f"vision:click:{x},{y}")
-        return True
 
-    elif action == "steps":
-        for step in result.get("steps", []):
-            if step["type"] == "click":
-                x, y = image_to_global_coordinates(step["x"], step["y"], metadata)
-                print(f"  [eye] Vision step: click at ({x}, {y})")
-                say(step.get("description", "Clicking"))
-                click_at(x, y)
-            elif step["type"] == "wait":
-                time.sleep(step.get("seconds", 1))
-        log_command(transcript, "vision:steps")
-        return True
+def execute_vision_steps_action(result, metadata, transcript):
+    """Execute a legacy multi-step vision action while enforcing click confidence gating."""
+    for index, step in enumerate(result.get("steps", []), start=1):
+        if step["type"] == "click":
+            confidence = step.get("confidence")
+            if confidence is not None and float(confidence) < VISION_MIN_CLICK_CONFIDENCE:
+                debug_event(
+                    "vision_click_low_confidence",
+                    confidence=float(confidence),
+                    threshold=VISION_MIN_CLICK_CONFIDENCE,
+                    step_index=index,
+                    action=step,
+                )
+                say("I couldn't safely identify where to click")
+                return False
+            x, y = resolve_click_coordinates(step, metadata)
+            print(f"  [eye] Vision step: click at ({x}, {y})")
+            say(step.get("description", "Clicking"))
+            click_at(x, y)
+        elif step["type"] == "wait":
+            time.sleep(step.get("seconds", 1))
+    log_command(transcript, "vision:steps")
+    return True
 
-    elif action == "not_found":
-        desc = result.get("description", "Could not find the target")
-        print(f"  [eye] Vision: {desc}")
-        say(desc)
-        return False
 
-    elif action == "noop":
-        desc = result.get("description", "Nothing else to do")
-        print(f"  [eye] Vision: {desc}")
-        return True
+def execute_vision_task(task, transcript):
+    """Resolve and execute a screen task with AX-first targeting and post-click verification."""
+    say("Let me look at the screen")
+
+    target_app = infer_target_app_name(f"{task} {transcript}")
+    gemini_verification_used = False
+
+    for attempt in range(1, VISION_CLICK_RETRY_LIMIT + 1):
+        try:
+            resolution = resolve_ui_target(target_app, task, transcript)
+        except StructuredOutputError as exc:
+            planner_failure(
+                "vision",
+                exc.category,
+                transcript=transcript,
+                task=task,
+                error=str(exc),
+                model=exc.model,
+                attempt=exc.attempt,
+                correlation_id=exc.correlation_id,
+                raw_response=exc.raw_response,
+            )
+            print(f"  !! Vision returned invalid structured output: {exc}")
+            say("I couldn't figure out where to click")
+            return False
+        except Exception as exc:
+            error_text = str(exc)
+            if any(token in error_text.lower() for token in ("screencapture", "capture", "screen")):
+                print(f"  !! Screenshot failed: {exc}")
+                debug_event("screenshot_error", error=error_text)
+                say("I couldn't capture the screen")
+            else:
+                print(f"  !! Vision step failed: {exc}")
+                debug_event("vision_error", task=task, transcript=transcript, error=error_text)
+                say("I couldn't figure out where to click")
+            return False
+
+        result = resolution["action"]
+        metadata = resolution["metadata"]
+        target_app = resolution.get("target_app", target_app)
+        action = result.get("action")
+
+        if action == "click":
+            confidence = result.get("confidence")
+            if confidence is not None and float(confidence) < VISION_MIN_CLICK_CONFIDENCE:
+                debug_event(
+                    "vision_click_low_confidence",
+                    confidence=float(confidence),
+                    threshold=VISION_MIN_CLICK_CONFIDENCE,
+                    action=result,
+                    target_app=target_app,
+                )
+                say("I couldn't safely identify where to click")
+                return False
+
+            x, y = resolve_click_coordinates(result, metadata)
+            desc = result.get("description", f"Clicking at ({x}, {y})")
+            print(f"  [eye] Vision: {desc}")
+            say(desc)
+            click_at(x, y)
+            time.sleep(VISION_CLICK_SETTLE_SECONDS)
+
+            verification = verify_postcondition(
+                result.get("expected_postcondition", ""),
+                target_app,
+                {
+                    **metadata,
+                    "task": task,
+                    "transcript": transcript,
+                    "description": desc,
+                    "target_label": result.get("target_label") or metadata.get("target_label", ""),
+                    "allow_gemini_verification": not gemini_verification_used,
+                },
+            )
+            gemini_verification_used = gemini_verification_used or verification.get("used_gemini", False)
+
+            if verification["status"] in {"verified", "unavailable"}:
+                debug_event(
+                    "vision_click_verified",
+                    target_app=target_app,
+                    attempt=attempt,
+                    verification_status=verification["status"],
+                    reason=verification["reason"],
+                )
+                log_command(transcript, f"vision:click:{x},{y}")
+                return True
+
+            if attempt < VISION_CLICK_RETRY_LIMIT:
+                debug_event(
+                    "vision_click_retry",
+                    target_app=target_app,
+                    attempt=attempt,
+                    max_attempts=VISION_CLICK_RETRY_LIMIT,
+                    reason=verification["reason"],
+                )
+                continue
+
+            debug_event(
+                "vision_click_unverified",
+                target_app=target_app,
+                attempt=attempt,
+                reason=verification["reason"],
+            )
+            say("I couldn't confirm the click worked")
+            return False
+
+        if action == "steps":
+            return execute_vision_steps_action(result, metadata, transcript)
+
+        if action == "not_found":
+            desc = result.get("description", "Could not find the target")
+            print(f"  [eye] Vision: {desc}")
+            say(desc)
+            return False
+
+        if action == "noop":
+            desc = result.get("description", "Nothing else to do")
+            print(f"  [eye] Vision: {desc}")
+            return True
 
     return False
 
@@ -2547,8 +3530,9 @@ The router has determined this request requires a multi-step workflow. Produce a
 6. `keypress`: simulate a keyboard shortcut.
 7. `type_text`: type a string at the current cursor position.
 8. `wait`: pause between steps for UI to settle.
-9. `vision`: screenshot + AI vision to find/click a UI element.
-10. `say`: speak text aloud.
+9. `wait_for_state`: poll for a specific UI state before continuing.
+10. `vision`: screenshot + AI vision to find/click a UI element.
+11. `say`: speak text aloud.
 
 ## Available Registered Commands (for "command" steps)
 {build_command_context()}
@@ -2571,14 +3555,15 @@ Return ONLY the workflow object that matches the configured response schema.
    nothing" in vision tasks.
 
 5. CHAT-APP PATTERN ("ask Claude about X"):
-   open_app -> wait -> vision(new chat) -> vision(ensure model) -> type_text -> keypress(return)
+   open_app -> wait_for_state(app_frontmost) -> vision(new chat) -> vision(ensure model) -> type_text -> keypress(return)
 
 6. QUIT PATTERN ("close chrome"): Single quit_app with normalized macOS name.
 
 7. CLICK PATTERN ("click on X"): Single vision step.
 
-8. WAIT PLACEMENT: Add wait (0.5-1.5s) after open_app and focus_app. Not after
-   keypress, type_text, or say.
+8. STATEFUL WAITING: Prefer wait_for_state after open_app and focus_app when
+   you can name the condition (frontmost app, window exists, element exists,
+   focused value contains text). Use plain wait only for short settle pauses.
 
 9. APP NAME NORMALIZATION: "chrome" -> "Google Chrome", "vs code" -> "Visual
    Studio Code", "claude" -> "Claude", etc.
@@ -2781,13 +3766,15 @@ def build_workflow_capabilities_context():
 - {"type": "keypress", "key": "return", "command": false, "shift": false, "ctrl": false, "option": false}
 - {"type": "type_text", "text": "what's the weather like today?"}
 - {"type": "wait", "seconds": 1.0}
+- {"type": "wait_for_state", "condition": "app_frontmost", "app": "Claude", "timeout_seconds": 2.0}
 - {"type": "vision", "task": "Open a new chat in Claude if one is not already open"}
 - {"type": "say", "text": "Working on it"}
 
 Use "workflow" for multi-step UI tasks, chat-app requests, model selection, or anything that involves more than one action.
 Use idempotent vision tasks for "ensure" style requests, for example: "If Claude is not using Sonnet, switch it to Sonnet. If it is already Sonnet, do nothing."
+Prefer wait_for_state when the next step depends on app focus, a window appearing, or an element becoming available.
 For prompts like "ask Claude Sonnet what's the weather like today", prefer:
-open_app -> wait -> vision(new chat) -> vision(ensure Sonnet) -> type_text -> keypress(return)."""
+open_app -> wait_for_state(app_frontmost) -> vision(new chat) -> vision(ensure Sonnet) -> type_text -> keypress(return)."""
 
 
 def build_planner_system_prompt():
@@ -2810,7 +3797,7 @@ Respond with EXACTLY one JSON object in one of these formats:
 2. Workflow plan:
 {{"action": "workflow", "description": "Short present-tense summary", "steps": [
   {{"type": "open_app", "app": "Claude", "fallback_url": "https://claude.ai"}},
-  {{"type": "wait", "seconds": 1.0}},
+  {{"type": "wait_for_state", "condition": "app_frontmost", "app": "Claude", "timeout_seconds": 2.0}},
   {{"type": "vision", "task": "Open a new chat in Claude if one is not already open"}},
   {{"type": "vision", "task": "If Claude is not using Sonnet, switch it to Sonnet. If it is already Sonnet, do nothing."}},
   {{"type": "type_text", "text": "what's the weather like today?"}},
@@ -2825,6 +3812,7 @@ Rules:
 - Do not emit a top-level "vision" action.
 - Do not emit "code".
 - Prefer idempotent steps that can be safely retried.
+- Prefer "wait_for_state" over blind "wait" when you can name the expected UI state.
 - Map "scroll up" and "scroll down" to the existing scroll_up / scroll_down commands, not "unknown".
 - Map "click on X" or "click X" to a workflow with a single vision step that clicks the named on-screen target.
 - Map "close chrome", "quit chrome", "close spotify", and similar requests to a quit_app workflow step with the normalized macOS app name.
@@ -3129,6 +4117,23 @@ def normalize_workflow_step_for_validation(step, index):
         except ValueError as exc:
             raise PlannerValidationError(f"workflow: step {index} has invalid wait seconds") from exc
 
+    if normalized.get("type") == "wait_for_state":
+        condition = normalized.get("condition")
+        if isinstance(condition, str):
+            lowered = condition.strip().lower()
+            if lowered != condition:
+                normalized["condition"] = lowered
+                warnings.append(f"step {index}: normalized wait_for_state condition casing")
+        for field_name in ("timeout_seconds", "poll_interval"):
+            if field_name in normalized and isinstance(normalized[field_name], str):
+                try:
+                    normalized[field_name] = float(normalized[field_name].strip())
+                    warnings.append(f"step {index}: coerced {field_name} to number")
+                except ValueError as exc:
+                    raise PlannerValidationError(
+                        f"workflow: step {index} has invalid {field_name}"
+                    ) from exc
+
     if normalized.get("type") == "command":
         corrected, correction_warning = maybe_correct_function_name(normalized.get("function", ""))
         if correction_warning:
@@ -3322,6 +4327,59 @@ def validate_workflow_output(result):
             elif seconds > MAX_WORKFLOW_WAIT_SECONDS:
                 step["seconds"] = MAX_WORKFLOW_WAIT_SECONDS
                 warnings.append(f"step {index}: clamped wait to {MAX_WORKFLOW_WAIT_SECONDS:.1f}s")
+
+        elif step_type == "wait_for_state":
+            condition = step["condition"].strip().lower()
+            if condition not in WAIT_FOR_STATE_CONDITIONS:
+                raise PlannerValidationError(
+                    f'workflow: step {index} has invalid wait_for_state condition "{condition}"'
+                )
+            step["condition"] = condition
+
+            timeout_seconds = float(step.get("timeout_seconds", WAIT_FOR_STATE_DEFAULT_TIMEOUT_SECONDS))
+            if timeout_seconds <= 0:
+                raise PlannerValidationError(f"workflow: step {index} has non-positive timeout_seconds")
+            if timeout_seconds > MAX_WORKFLOW_WAIT_SECONDS:
+                step["timeout_seconds"] = MAX_WORKFLOW_WAIT_SECONDS
+                warnings.append(
+                    f"step {index}: clamped wait_for_state timeout to {MAX_WORKFLOW_WAIT_SECONDS:.1f}s"
+                )
+            else:
+                step["timeout_seconds"] = timeout_seconds
+
+            poll_interval = float(step.get("poll_interval", WAIT_FOR_STATE_DEFAULT_POLL_INTERVAL))
+            if poll_interval <= 0:
+                raise PlannerValidationError(f"workflow: step {index} has non-positive poll_interval")
+            clamped_poll_interval = min(
+                WAIT_FOR_STATE_MAX_POLL_INTERVAL,
+                max(WAIT_FOR_STATE_MIN_POLL_INTERVAL, poll_interval),
+            )
+            if clamped_poll_interval != poll_interval:
+                warnings.append(f"step {index}: clamped wait_for_state poll_interval")
+            step["poll_interval"] = clamped_poll_interval
+
+            app_name = step.get("app", "").strip()
+            if condition in {"app_frontmost", "window_exists", "element_exists", "element_value_contains"}:
+                if not app_name:
+                    raise PlannerValidationError(f"workflow: step {index} wait_for_state requires app")
+                step["app"] = app_name
+                active_app_context = True
+
+            if condition == "element_exists":
+                label = step.get("label", "").strip()
+                if not label:
+                    raise PlannerValidationError(f"workflow: step {index} element_exists requires label")
+                step["label"] = label
+                if "role" in step:
+                    step["role"] = step["role"].strip()
+
+            elif condition == "element_value_contains":
+                substring = step.get("substring", "").strip()
+                if not substring:
+                    raise PlannerValidationError(
+                        f"workflow: step {index} element_value_contains requires substring"
+                    )
+                step["substring"] = substring
 
         elif step_type == "vision":
             task = step["task"].strip()
@@ -3543,6 +4601,14 @@ def execute_workflow_once(workflow, transcript):
                 seconds = max(0.0, min(float(step.get("seconds", 1)), 10.0))
                 time.sleep(seconds)
                 ok = True
+            elif step_type == "wait_for_state":
+                condition_fn, condition_name = build_wait_for_state_condition(step)
+                ok = wait_for_state(
+                    condition_fn,
+                    timeout_seconds=step.get("timeout_seconds", WAIT_FOR_STATE_DEFAULT_TIMEOUT_SECONDS),
+                    poll_interval=step.get("poll_interval", WAIT_FOR_STATE_DEFAULT_POLL_INTERVAL),
+                    condition_name=condition_name,
+                )
             elif step_type == "type_text":
                 text = extract_text_argument(step.get("text"))
                 if not text:
