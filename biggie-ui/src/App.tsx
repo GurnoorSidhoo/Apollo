@@ -682,7 +682,7 @@ export default function App() {
                   exit={{ opacity: 0 }}
                   className="text-[10px] tracking-[0.18em] text-text-muted/25 uppercase"
                 >
-                  Hold F9 to talk
+                  Hold middle click to talk
                 </motion.span>
               ) : null}
             </AnimatePresence>

@@ -79,7 +79,7 @@ WHISPER_SILENCE_THRESHOLD = float(os.environ.get("APOLLO_WHISPER_SILENCE_THRESHO
 # Push-to-talk (default: enabled; set APOLLO_PTT=0 to disable)
 # ---------------------------------------------------------------------------
 PTT_ENABLED = os.environ.get("APOLLO_PTT", "1").lower() not in {"0", "false", "no"}
-PTT_BUTTON = os.environ.get("APOLLO_PTT_BUTTON", "f9").strip().lower()
+PTT_BUTTON = os.environ.get("APOLLO_PTT_BUTTON", "middle").strip().lower()
 
 LIP_READING_ENABLED = os.environ.get("APOLLO_LIP_READING", "").lower() in {"1", "true", "yes"}
 LIP_SYNC_ENABLED = os.environ.get("APOLLO_LIP_SYNC", "").lower() in {"1", "true", "yes"}

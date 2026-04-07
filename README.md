@@ -122,7 +122,7 @@ Important environment variables:
 | `APOLLO_SAVE_VISION_DEBUG` | `0` | Saves vision screenshots locally |
 | `APOLLO_VERBOSE_AI` | `0` | Prints verbose AI trace output |
 | `APOLLO_PTT` | `1` | Push-to-talk via mouse button (enabled by default) |
-| `APOLLO_PTT_BUTTON` | `f9` | Key or button: `f9`–`f12`, `scroll_lock`, `pause`, `caps_lock`, or mouse `back`, `forward`, `middle` |
+| `APOLLO_PTT_BUTTON` | `middle` | Key or button: `f9`–`f12`, `scroll_lock`, `pause`, `caps_lock`, or mouse `back`, `forward`, `middle` |
 | `APOLLO_LIP_READING` | `0` | Enables webcam-based lip reading |
 | `APOLLO_LIP_SYNC` | `0` | Enables lip-sync animation |
 
@@ -130,12 +130,13 @@ See `apollo/config.py` for the full list.
 
 ## Push-to-Talk
 
-Push-to-talk is enabled by default on **F9**. Hold the key to talk, release to send. Wake word detection ("Biggie") still works as a fallback when PTT is not held.
+Push-to-talk is enabled by default on the **middle mouse button**. Hold it to talk, release to send. Wake word detection ("Biggie") still works as a fallback when PTT is not held.
 
 To use a different key or mouse button:
 
 ```bash
-export APOLLO_PTT_BUTTON=f9        # default
+export APOLLO_PTT_BUTTON=middle    # default
+export APOLLO_PTT_BUTTON=f9
 export APOLLO_PTT_BUTTON=f12
 export APOLLO_PTT_BUTTON=back      # MX Master 3 rear thumb button
 export APOLLO_PTT_BUTTON=forward   # MX Master 3 front thumb button

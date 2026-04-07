@@ -19,7 +19,7 @@ import time
 from apollo.config import WAKE_SOUND
 from apollo.logging_utils import debug_event
 
-_PTT_BUTTON_NAME = os.environ.get("APOLLO_PTT_BUTTON", "f9").strip().lower()
+_PTT_BUTTON_NAME = os.environ.get("APOLLO_PTT_BUTTON", "middle").strip().lower()
 
 # Keys that map to pynput Key enum attributes
 _KEY_MAP = {
