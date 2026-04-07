@@ -1,0 +1,44 @@
+{
+  "stale_open_chrome": {
+    "transcript": "open chrome",
+    "action": "open_chrome",
+    "app": "Google Chrome",
+    "success": true,
+    "timestamp_offset_seconds": 600
+  },
+  "stale_open_spotify": {
+    "transcript": "open spotify",
+    "action": "open_spotify",
+    "app": "Spotify",
+    "success": true,
+    "timestamp_offset_seconds": 600
+  },
+  "stale_open_vscode": {
+    "transcript": "open code",
+    "action": "open_vscode",
+    "app": "Visual Studio Code",
+    "success": true,
+    "timestamp_offset_seconds": 600
+  },
+  "stale_type_message": {
+    "transcript": "type what's the weather like today?",
+    "action": "type_text",
+    "app": "Claude",
+    "success": true,
+    "timestamp_offset_seconds": 600
+  },
+  "stale_click_submit": {
+    "transcript": "click on the submit button",
+    "action": "workflow",
+    "app": "Google Chrome",
+    "success": true,
+    "timestamp_offset_seconds": 600
+  },
+  "recent_open_chrome": {
+    "transcript": "open chrome",
+    "action": "open_chrome",
+    "app": "Google Chrome",
+    "success": true,
+    "timestamp_offset_seconds": 20
+  }
+}

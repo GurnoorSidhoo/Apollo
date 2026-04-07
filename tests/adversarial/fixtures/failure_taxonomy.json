@@ -1,0 +1,77 @@
+{
+  "version": "1.0.0",
+  "classes": {
+    "F01": {
+      "name": "False Positive Match",
+      "description": "Fuzzy matcher returns high confidence on the wrong command."
+    },
+    "F02": {
+      "name": "Missed Negation",
+      "description": "System ignores negation or cancellation language and proceeds anyway."
+    },
+    "F03": {
+      "name": "Phantom Step Injection",
+      "description": "Planner hallucinates steps the user never requested."
+    },
+    "F04": {
+      "name": "Homophone Misroute",
+      "description": "ASR homophone or near-homophone changes command meaning."
+    },
+    "F05": {
+      "name": "Partial Transcript Execution",
+      "description": "System acts on an incomplete transcript before the utterance fully resolves."
+    },
+    "F06": {
+      "name": "Confidence Inflation",
+      "description": "Short phrase overlap inflates fuzzy confidence and bypasses safer routing."
+    },
+    "F07": {
+      "name": "Negation Scope Error",
+      "description": "Negation is detected but attached to the wrong verb or object."
+    },
+    "F08": {
+      "name": "Stale Context Hallucination",
+      "description": "Expired prior-command context resolves an ambiguous follow-up incorrectly."
+    },
+    "F09": {
+      "name": "App Name Collision",
+      "description": "Ambiguous app-like names resolve to the wrong application."
+    },
+    "F10": {
+      "name": "Implicit Multi-Step Miss",
+      "description": "Composite intent lacks explicit connectors and is misrouted as single-step."
+    },
+    "F11": {
+      "name": "Destructive Action Passthrough",
+      "description": "System executes destructive, privacy-violating, or security-sensitive requests without refusal."
+    },
+    "F12": {
+      "name": "Vision Target Hallucination",
+      "description": "Vision workflow clicks a non-existent or semantically wrong target."
+    },
+    "F13": {
+      "name": "Filler Word Poisoning",
+      "description": "ASR filler tokens are incorrectly treated as meaningful command content."
+    },
+    "F14": {
+      "name": "Repetition Amplification",
+      "description": "Repeated phrases or stutters cause duplicate execution or misclassification."
+    },
+    "F15": {
+      "name": "Prefix/Suffix Stripping Over-Reach",
+      "description": "Wrapper stripping removes meaningful user content instead of just filler."
+    },
+    "F16": {
+      "name": "Dangling Pronoun Resolution",
+      "description": "Pronouns like it/that/this are resolved to the wrong referent or silently guessed."
+    },
+    "F17": {
+      "name": "Click Target Ambiguity",
+      "description": "Requested UI target is underspecified, duplicated, or missing."
+    },
+    "F18": {
+      "name": "ASR Compound Error",
+      "description": "Multiple ASR errors combine into a materially different meaning."
+    }
+  }
+}

@@ -163,6 +163,33 @@ class ApolloReliabilityTests(unittest.TestCase):
         self.assertFalse(listener.is_capturing_command)
         self.assertEqual(listener.command_buffer, "")
 
+    def test_deepgram_variants_prefer_bare_by_default(self):
+        listener = apollo.AudioListener()
+
+        with mock.patch.object(apollo.audio, "DEEPGRAM_PREFER_RICH_VARIANTS", False):
+            variants = listener._build_deepgram_connect_variants()
+
+        self.assertEqual(variants[0]["name"], "bare")
+
+    def test_deepgram_variants_can_prefer_rich_when_enabled(self):
+        listener = apollo.AudioListener()
+
+        with mock.patch.object(apollo.audio, "DEEPGRAM_PREFER_RICH_VARIANTS", True):
+            variants = listener._build_deepgram_connect_variants()
+
+        self.assertNotEqual(variants[0]["name"], "bare")
+        self.assertIn("bare", [variant["name"] for variant in variants])
+
+    def test_has_mediapipe_face_mesh_checks_classic_module_paths(self):
+        with mock.patch.object(apollo.utils.importlib.util, "find_spec", side_effect=lambda name: object() if name == "mediapipe.solutions.face_mesh" else None):
+            self.assertTrue(apollo.has_mediapipe_face_mesh())
+
+        with mock.patch.object(apollo.utils.importlib.util, "find_spec", side_effect=lambda name: object() if name == "mediapipe.python.solutions.face_mesh" else None):
+            self.assertTrue(apollo.has_mediapipe_face_mesh())
+
+        with mock.patch.object(apollo.utils.importlib.util, "find_spec", return_value=None):
+            self.assertFalse(apollo.has_mediapipe_face_mesh())
+
     def test_mid_sentence_biggie_does_not_trigger_wake_word(self):
         detected, trailing = apollo.detect_wake_word("yeah my biggie is stupid")
         self.assertFalse(detected)
@@ -261,6 +288,31 @@ class ApolloReliabilityTests(unittest.TestCase):
         self.assertEqual(result["description"], "Clicking submit")
         self.assertEqual(result["steps"][0]["type"], "vision")
         self.assertEqual(len(calls), 1)
+
+    def test_llm_interpret_command_eval_mode_prefers_eval_model(self):
+        with mock.patch.dict("os.environ", {"APOLLO_EVAL_PLANNER_MODEL": "gemini-2.5-flash"}):
+            with mock.patch.object(apollo, "gemini_generate_json", return_value='{"action":"unknown"}') as generate_json:
+                apollo.llm_interpret_command("click submit", complex=True, eval_mode=True)
+
+        self.assertEqual(
+            generate_json.call_args.kwargs["preferred_models"],
+            apollo.model_candidates("gemini-2.5-flash", apollo.GEMINI_PLANNER_MODEL, apollo.GEMINI_MODEL),
+        )
+
+    def test_llm_interpret_command_normal_complex_mode_keeps_production_model(self):
+        with mock.patch.object(apollo, "gemini_generate_json", return_value='{"action":"unknown"}') as generate_json:
+            apollo.llm_interpret_command("click submit", complex=True)
+
+        self.assertEqual(
+            generate_json.call_args.kwargs["preferred_models"],
+            apollo.model_candidates(apollo.GEMINI_PLANNER_MODEL, apollo.GEMINI_MODEL, "gemini-2.5-flash"),
+        )
+
+    def test_resolve_eval_planner_model_falls_back_to_production_when_unset(self):
+        with mock.patch.dict("os.environ", {}, clear=True):
+            model = apollo.resolve_eval_planner_model()
+
+        self.assertEqual(model, apollo.GEMINI_PLANNER_MODEL)
 
     def test_replan_accepts_valid_structured_json(self):
         result, calls = self._run_structured(
