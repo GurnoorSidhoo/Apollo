@@ -75,6 +75,12 @@ WHISPER_SILENCE_THRESHOLD = float(os.environ.get("APOLLO_WHISPER_SILENCE_THRESHO
 # ---------------------------------------------------------------------------
 # Lip Reading / Lip Sync (optional — requires opencv-python, mediapipe)
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Push-to-talk (default: enabled; set APOLLO_PTT=0 to disable)
+# ---------------------------------------------------------------------------
+PTT_ENABLED = os.environ.get("APOLLO_PTT", "1").lower() not in {"0", "false", "no"}
+PTT_BUTTON = os.environ.get("APOLLO_PTT_BUTTON", "f9").strip().lower()
+
 LIP_READING_ENABLED = os.environ.get("APOLLO_LIP_READING", "").lower() in {"1", "true", "yes"}
 LIP_SYNC_ENABLED = os.environ.get("APOLLO_LIP_SYNC", "").lower() in {"1", "true", "yes"}
 WEBCAM_DEVICE_INDEX = _read_env_int("APOLLO_WEBCAM_DEVICE", 0)
@@ -137,6 +143,8 @@ AX_QUERY_MAX_CHILDREN = _read_env_int("APOLLO_AX_QUERY_MAX_CHILDREN", 40)
 # ---------------------------------------------------------------------------
 # Vision
 # ---------------------------------------------------------------------------
+CLIPBOARD_PASTE_THRESHOLD = _read_env_int("APOLLO_CLIPBOARD_PASTE_THRESHOLD", 80)
+
 VISION_MIN_CLICK_CONFIDENCE = _read_env_float("APOLLO_VISION_MIN_CLICK_CONFIDENCE", 0.6)
 VISION_CLICK_SETTLE_SECONDS = _read_env_float("APOLLO_VISION_CLICK_SETTLE_SECONDS", 0.4)
 VISION_CLICK_RETRY_LIMIT = max(1, _read_env_int("APOLLO_VISION_CLICK_RETRY_LIMIT", 2))

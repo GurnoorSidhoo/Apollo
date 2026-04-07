@@ -1,0 +1,13 @@
+{
+  "name": "apollo-autocoder",
+  "private": true,
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "dev": "npm --prefix biggie-ui run dev --",
+    "build": "npm --prefix biggie-ui run build",
+    "lint:ui": "npm --prefix biggie-ui run lint",
+    "install:ui": "npm --prefix biggie-ui install"
+  }
+}

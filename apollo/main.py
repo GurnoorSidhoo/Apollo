@@ -16,6 +16,8 @@ from apollo.config import (
     GEMINI_VISION_MODEL,
     LIP_READING_ENABLED,
     LIP_SYNC_ENABLED,
+    PTT_BUTTON,
+    PTT_ENABLED,
     SAVE_VISION_DEBUG,
     TRANSCRIPT_LOG,
     VISION_DEBUG_DIR,
@@ -166,6 +168,15 @@ def run_text_mode():
     if not check_dependencies(text_mode=True):
         return
 
+    # Start WebSocket bridge for the Biggie UI
+    try:
+        from apollo.bridge import start_server, install_hooks
+        start_server()
+        install_hooks()
+        print(f"  [ui] Biggie UI bridge running on ws://127.0.0.1:8765")
+    except Exception as e:
+        print(f"  [ui] Bridge unavailable ({e}) — UI will not receive events")
+
     debug_event("text_mode_started")
     print("  Biggie text mode is ready.\n")
 
@@ -245,7 +256,34 @@ def main():
         debug_event("microphone_error", error=str(e))
         return
 
-    apollo.say("Biggie is ready")
+    # Start WebSocket bridge for the Biggie UI
+    try:
+        from apollo.bridge import start_server, install_hooks
+        start_server()
+        install_hooks()
+        print(f"  [ui] Biggie UI bridge running on ws://127.0.0.1:8765")
+    except Exception as e:
+        print(f"  [ui] Bridge unavailable ({e}) — UI will not receive events")
+
+    # Start push-to-talk controller if enabled
+    ptt = None
+    if PTT_ENABLED:
+        try:
+            from apollo.ptt import PushToTalkController
+            ptt = PushToTalkController(listener)
+            listener.ptt_controller = ptt
+            ptt.start()
+        except ImportError as e:
+            print(f"  [ptt] pynput not installed ({e}) — PTT disabled, using wake word only")
+            debug_event("ptt_import_error", error=str(e))
+        except Exception as e:
+            print(f"  [ptt] PTT init failed ({e}) — using wake word only")
+            debug_event("ptt_init_error", error=str(e))
+
+    if ptt:
+        apollo.say("Biggie is ready. Hold mouse button to talk.")
+    else:
+        apollo.say("Biggie is ready")
 
     try:
         listener.start()
@@ -256,6 +294,8 @@ def main():
             print(f"  [fallback] Switching to local Whisper voice mode ({WHISPER_MODEL})")
             apollo.say("Deepgram is unavailable. Switching to local voice mode.")
             fallback_listener = apollo.WhisperAudioListener()
+            if ptt:
+                fallback_listener.ptt_controller = ptt
             fallback_listener.start()
         else:
             print("  !! Local Whisper fallback is not installed.")

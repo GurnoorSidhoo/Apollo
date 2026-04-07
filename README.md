@@ -31,6 +31,7 @@ apollo/
   utils.py          Text normalization and shared helpers
   vision.py         Screenshot capture and vision execution
   workflow.py       Workflow execution and replanning
+biggie-ui/          Desktop UI (React + TypeScript + Tailwind + Framer Motion)
 custom_commands.py  User-defined commands
 docs/agents/        Maintainer and agent-facing operating docs
 tests/              Reliability and adversarial test suites
@@ -42,6 +43,7 @@ requirements*.txt   Python dependency manifests
 
 - macOS
 - Python 3.10+
+- Node.js 20+ (for the desktop UI)
 - Homebrew
 - Microphone access
 - Accessibility access for your terminal app
@@ -87,15 +89,20 @@ Grant these macOS permissions under `System Settings -> Privacy & Security`:
 .venv/bin/python -m apollo --text
 ```
 
-Example prompts:
+With push-to-talk (default), hold the mouse back button and speak:
+
+```text
+save
+open Chrome
+type hello world
+click the submit button
+```
+
+Or use the wake word if PTT is disabled:
 
 ```text
 Biggie, save
 Biggie, open Chrome
-Biggie, type hello world
-Biggie, click the submit button
-Biggie, ask Claude what the weather is today
-Biggie, stop listening
 ```
 
 ## Configuration
@@ -114,10 +121,33 @@ Important environment variables:
 | `APOLLO_WHISPER_MODEL` | `tiny` | Local Whisper model |
 | `APOLLO_SAVE_VISION_DEBUG` | `0` | Saves vision screenshots locally |
 | `APOLLO_VERBOSE_AI` | `0` | Prints verbose AI trace output |
+| `APOLLO_PTT` | `1` | Push-to-talk via mouse button (enabled by default) |
+| `APOLLO_PTT_BUTTON` | `f9` | Key or button: `f9`–`f12`, `scroll_lock`, `pause`, `caps_lock`, or mouse `back`, `forward`, `middle` |
 | `APOLLO_LIP_READING` | `0` | Enables webcam-based lip reading |
 | `APOLLO_LIP_SYNC` | `0` | Enables lip-sync animation |
 
 See `apollo/config.py` for the full list.
+
+## Push-to-Talk
+
+Push-to-talk is enabled by default on **F9**. Hold the key to talk, release to send. Wake word detection ("Biggie") still works as a fallback when PTT is not held.
+
+To use a different key or mouse button:
+
+```bash
+export APOLLO_PTT_BUTTON=f9        # default
+export APOLLO_PTT_BUTTON=f12
+export APOLLO_PTT_BUTTON=back      # MX Master 3 rear thumb button
+export APOLLO_PTT_BUTTON=forward   # MX Master 3 front thumb button
+```
+
+To disable PTT and use wake word only:
+
+```bash
+export APOLLO_PTT=0
+```
+
+PTT requires the `pynput` package and macOS Accessibility access for your terminal app.
 
 ## Custom Commands
 
@@ -161,6 +191,41 @@ Run the core reliability tests only:
 ```
 
 Some adversarial tests are Gemini-backed and will skip automatically if `GEMINI_API_KEY` is not set.
+
+## Desktop UI
+
+Biggie includes a desktop interface that connects to the running Apollo backend via WebSocket. The UI displays real-time state: voice transcripts as they stream in, assistant responses, action execution status, and the current agent state (idle, listening, thinking, executing). You can also type commands directly from the UI.
+
+The backend starts a WebSocket bridge on `ws://127.0.0.1:8765` automatically when Apollo launches. The UI connects to it and receives live events.
+
+```bash
+# 1. Start Apollo (voice or text mode)
+.venv/bin/python -m apollo          # voice mode
+.venv/bin/python -m apollo --text   # text mode
+
+# 2. In a separate terminal, start the UI
+cd biggie-ui
+npm install
+npm run dev
+# → http://localhost:5173
+```
+
+If you prefer to stay in the repo root, the same UI commands are also available there:
+
+```bash
+npm run install:ui
+npm run dev
+```
+
+The `websockets` Python package is required for the bridge (included in `requirements.txt`).
+
+Build the UI for production:
+
+```bash
+cd biggie-ui && npm run build   # output in biggie-ui/dist/
+# or from the repo root:
+npm run build
+```
 
 ## Maintainer Docs
 

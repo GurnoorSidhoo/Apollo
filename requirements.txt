@@ -2,4 +2,6 @@
 deepgram-sdk
 google-genai
 numpy
+pynput
 sounddevice
+websockets

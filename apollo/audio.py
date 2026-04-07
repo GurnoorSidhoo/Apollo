@@ -78,6 +78,7 @@ class AudioListener:
         self._command_timer = None
         self._preferred_deepgram_variant = None
         self._lip_reader = None
+        self.ptt_controller = None  # set by main.py when PTT is enabled
 
     def _build_deepgram_connect_variants(self):
         """Build Deepgram handshake variants from richest to safest."""
@@ -163,6 +164,14 @@ class AudioListener:
 
         now = time.time()
 
+        # --- PTT mode: while button is held, buffer everything directly ---
+        if self.ptt_controller and self.ptt_controller.is_held:
+            if self.is_capturing_command:
+                self._append_command_text(text)
+            # If PTT is held but capture hasn't started yet (race), ignore.
+            return
+
+        # --- Standard wake-word mode ---
         if self.is_capturing_command:
             detected, trailing = apollo.detect_wake_word(text)
             if detected:
@@ -195,6 +204,10 @@ class AudioListener:
     def _handle_utterance_end(self):
         """Called when Deepgram detects the speaker has stopped talking (silence)."""
         if not self.is_capturing_command:
+            return
+
+        # PTT mode: don't dispatch on silence, only on button release
+        if self.ptt_controller and self.ptt_controller.is_held:
             return
 
         # If lips are still moving, defer — the user is still talking

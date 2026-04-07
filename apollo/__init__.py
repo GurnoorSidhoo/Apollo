@@ -129,6 +129,8 @@ from apollo.macos import (                           # noqa: F401,F403
     condition_element_value_contains,
     build_wait_for_state_condition,
     should_use_accessibility,
+    set_clipboard_and_paste,
+    ensure_text_input_focused,
 )
 
 # ===========================================================================

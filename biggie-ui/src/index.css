@@ -1,0 +1,110 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg-primary: #0a0b10;
+  --color-bg-secondary: #12131a;
+  --color-bg-tertiary: #1a1b24;
+  --color-bg-panel: #14151e;
+  --color-border-subtle: rgba(255, 255, 255, 0.06);
+  --color-border-accent: rgba(56, 189, 248, 0.2);
+  --color-accent-cyan: #38bdf8;
+  --color-accent-blue: #6366f1;
+  --color-accent-teal: #2dd4bf;
+  --color-accent-amber: #fbbf24;
+  --color-accent-rose: #fb7185;
+  --color-text-primary: #f1f5f9;
+  --color-text-secondary: #94a3b8;
+  --color-text-muted: #64748b;
+  --color-glow-cyan: rgba(56, 189, 248, 0.15);
+  --color-glow-blue: rgba(99, 102, 241, 0.15);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--color-bg-primary);
+  color: var(--color-text-primary);
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow: hidden;
+}
+
+#root {
+  width: 100vw;
+  height: 100vh;
+}
+
+/* Orb animations */
+@keyframes orb-idle {
+  0%, 100% { transform: scale(1); opacity: 0.6; }
+  50% { transform: scale(1.03); opacity: 0.8; }
+}
+
+@keyframes orb-listening {
+  0%, 100% { transform: scale(1); }
+  25% { transform: scale(1.08) rotate(1deg); }
+  50% { transform: scale(1.12); }
+  75% { transform: scale(1.08) rotate(-1deg); }
+}
+
+@keyframes orb-thinking {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+@keyframes orb-executing {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.05); }
+}
+
+@keyframes pulse-ring {
+  0% { transform: scale(1); opacity: 0.4; }
+  100% { transform: scale(1.8); opacity: 0; }
+}
+
+@keyframes float-particle {
+  0%, 100% { transform: translateY(0px) translateX(0px); opacity: 0; }
+  10% { opacity: 1; }
+  90% { opacity: 1; }
+  100% { transform: translateY(-60px) translateX(20px); opacity: 0; }
+}
+
+@keyframes waveform {
+  0%, 100% { height: 4px; }
+  50% { height: var(--wave-height, 20px); }
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes subtle-drift {
+  0%, 100% { transform: translate(0, 0); }
+  33% { transform: translate(2px, -3px); }
+  66% { transform: translate(-2px, 2px); }
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 2px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+}

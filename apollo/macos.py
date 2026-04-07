@@ -22,6 +22,7 @@ from apollo.config import (
     AX_QUERY_MAX_RESULTS,
     AX_QUERY_TIMEOUT_SECONDS,
     AX_ROLE_KEYWORDS,
+    CLIPBOARD_PASTE_THRESHOLD,
     GENERIC_APP_ALIASES,
     LIP_SYNC_ENABLED,
     VOICE_FEEDBACK,
@@ -195,7 +196,7 @@ def press_key(key, command=False, shift=False, ctrl=False, option=False):
         script = f'tell application "System Events" to {key_expr} using {{{modifier_str}}}'
     else:
         script = f'tell application "System Events" to {key_expr}'
-    applescript(script)
+    run_applescript(script)
 
 
 def hotkey(key, command=False, shift=False, ctrl=False, option=False):
@@ -204,10 +205,62 @@ def hotkey(key, command=False, shift=False, ctrl=False, option=False):
 
 
 def type_string(text):
-    """Type a string character by character using AppleScript."""
+    """Type a string using AppleScript, or clipboard paste for long text."""
+    if len(text) > CLIPBOARD_PASTE_THRESHOLD:
+        set_clipboard_and_paste(text)
+        return
     escaped = text.replace('\\', '\\\\').replace('"', '\\"')
     script = f'tell application "System Events" to keystroke "{escaped}"'
-    applescript(script)
+    run_applescript(script)
+
+
+def set_clipboard_and_paste(text):
+    """Set the system clipboard and paste via Cmd+V. Used for long text to avoid slow keystroke delivery."""
+    escaped = text.replace('\\', '\\\\').replace('"', '\\"')
+    run_applescript(f'set the clipboard to "{escaped}"')
+    # Small settle time so the clipboard is ready before the paste keystroke
+    time.sleep(0.05)
+    run_applescript('tell application "System Events" to keystroke "v" using {command down}')
+
+
+def ensure_text_input_focused(app_name):
+    """Return True when a text input element is focused in the given app.
+
+    Checks for AXTextField, AXTextArea, AXComboBox, or AXWebArea roles on the
+    currently focused UI element.  Returns False if no suitable element is
+    focused or if the AX query fails.
+    """
+    resolved_app = _resolve_generic_app_name(app_name) if app_name else ""
+    if not resolved_app:
+        return False
+    payload = _run_ax_query_json(
+        "focused_role",
+        """
+function run(argv) {
+  var appName = argv[0] || "";
+  var systemEvents = Application("System Events");
+  var process = systemEvents.processes.byName(appName);
+  if (!process.exists()) return JSON.stringify({status: "missing_process", role: "", subrole: ""});
+  try {
+    var focused = process.focusedUIElement();
+    if (!focused) return JSON.stringify({status: "ok", role: "", subrole: ""});
+    var role = "";
+    var subrole = "";
+    try { role = String(focused.role()); } catch (e) {}
+    try { subrole = String(focused.subrole()); } catch (e) {}
+    return JSON.stringify({status: "ok", role: role, subrole: subrole});
+  } catch (e) {
+    return JSON.stringify({status: "ok", role: "", subrole: ""});
+  }
+}
+""",
+        [resolved_app],
+    )
+    if payload is None:
+        return False
+    role = (payload.get("role") or "").lower()
+    text_roles = {"axtextfield", "axtextarea", "axcombobox", "axwebarea"}
+    return role in text_roles
 
 
 def get_input_device():

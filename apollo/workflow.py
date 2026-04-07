@@ -66,6 +66,71 @@ def execute_registered_command(func_name, transcript, args=None, source="llm"):
         return False
 
 
+def _check_step_postcondition(step, target_app):
+    """Verify a workflow step's expected_postcondition when present.
+
+    Returns True when verified or when no postcondition is specified.
+    Returns False when the postcondition check fails.
+    """
+    import apollo
+
+    postcondition = (step.get("expected_postcondition") or "").strip()
+    if not postcondition:
+        return True
+
+    app_name = target_app or step.get("app", "").strip()
+    if not app_name:
+        debug_event("step_postcondition_skip", reason="no_app", postcondition=postcondition)
+        return True
+
+    # Build a wait_for_state condition from the postcondition text when possible
+    # Try element_exists first (covers "chat open", "model selected", "prompt present")
+    from apollo.macos import (
+        extract_target_label_from_text,
+        condition_app_frontmost,
+        condition_element_exists,
+        condition_element_value_contains,
+        wait_for_state,
+    )
+    from apollo.utils import extract_target_role_from_text, extract_first_quoted_text
+
+    label = extract_target_label_from_text(postcondition)
+    role = extract_target_role_from_text(postcondition)
+    quoted = extract_first_quoted_text(postcondition)
+
+    condition_fn = None
+    condition_name = ""
+
+    if label or role:
+        condition_fn = condition_element_exists(app_name, label or "", role or "")
+        condition_name = f"postcondition:element_exists:{app_name}:{label or role}"
+    elif quoted:
+        condition_fn = condition_element_value_contains(app_name, quoted)
+        condition_name = f"postcondition:value_contains:{app_name}:{quoted}"
+    elif any(kw in postcondition.lower() for kw in ("frontmost", "foreground", "focused", "active")):
+        condition_fn = condition_app_frontmost(app_name)
+        condition_name = f"postcondition:app_frontmost:{app_name}"
+
+    if condition_fn is None:
+        debug_event("step_postcondition_skip", reason="no_matching_heuristic", postcondition=postcondition)
+        return True
+
+    ok = wait_for_state(
+        condition_fn,
+        timeout_seconds=WAIT_FOR_STATE_DEFAULT_TIMEOUT_SECONDS,
+        poll_interval=WAIT_FOR_STATE_DEFAULT_POLL_INTERVAL,
+        condition_name=condition_name,
+    )
+    debug_event(
+        "step_postcondition_result",
+        postcondition=postcondition,
+        app=app_name,
+        satisfied=ok,
+        condition_name=condition_name,
+    )
+    return ok
+
+
 def summarize_completed_steps(completed_steps):
     """Return a compact summary of completed workflow steps for replanning."""
     summary = []
@@ -229,6 +294,9 @@ def execute_workflow_once(workflow, transcript):
                 text = apollo.extract_text_argument(step.get("text"))
                 if not text:
                     raise ValueError("type_text requires text")
+                target_app = step.get("app", "").strip()
+                if target_app and not apollo.ensure_text_input_focused(target_app):
+                    debug_event("type_text_no_focus", app=target_app, text=text[:80])
                 print(f'  [keyboard] Typing: "{text}"')
                 apollo.type_string(text)
                 ok = True
@@ -281,6 +349,24 @@ def execute_workflow_once(workflow, transcript):
                 "step": step,
                 "completed_steps": completed_steps,
             }
+
+        # Postcondition check for steps that interact with external UI
+        if ok and step.get("expected_postcondition"):
+            step_app = step.get("app", "").strip()
+            if not _check_step_postcondition(step, step_app) and not optional:
+                debug_event(
+                    "workflow_step_postcondition_failed",
+                    index=index,
+                    step=step,
+                    postcondition=step.get("expected_postcondition"),
+                )
+                return False, {
+                    "reason": "postcondition_failed",
+                    "message": f"Postcondition not satisfied: {step.get('expected_postcondition')}",
+                    "index": index,
+                    "step": step,
+                    "completed_steps": completed_steps,
+                }
 
         completed_steps.append({"index": index, "step": step, "result": "ok" if ok else "skipped"})
 
