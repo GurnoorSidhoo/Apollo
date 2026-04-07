@@ -58,10 +58,13 @@ def check_dependencies(text_mode=False):
             import numpy
         except ImportError:
             missing.append("numpy")
-        try:
-            from deepgram import DeepgramClient
-        except ImportError:
-            missing.append("deepgram-sdk")
+
+        use_deepgram = bool(DEEPGRAM_API_KEY) and len(DEEPGRAM_API_KEY) >= 20
+        if use_deepgram:
+            try:
+                from deepgram import DeepgramClient  # noqa: F401
+            except ImportError:
+                missing.append("deepgram-sdk")
 
         if missing:
             print("  !! Missing packages. Run this command:\n")
@@ -80,7 +83,7 @@ def check_dependencies(text_mode=False):
 
         if DEEPGRAM_API_KEY and len(DEEPGRAM_API_KEY) < 20:
             if has_local_whisper():
-                print("  [warn] DEEPGRAM_API_KEY looks invalid or truncated -- Whisper fallback is available")
+                print("  [warn] DEEPGRAM_API_KEY looks invalid or truncated -- using local Whisper voice input instead")
             else:
                 print("  !! DEEPGRAM_API_KEY looks invalid or truncated.")
                 print("     Re-copy the key from Deepgram and export it again.")
@@ -234,7 +237,8 @@ def main():
     if not check_dependencies():
         return
 
-    listener = apollo.AudioListener()
+    use_deepgram = bool(DEEPGRAM_API_KEY) and len(DEEPGRAM_API_KEY) >= 20
+    listener = apollo.AudioListener() if use_deepgram else apollo.WhisperAudioListener()
 
     # Quick test: can we access the mic?
     try:
@@ -296,7 +300,12 @@ def main():
             fallback_listener = apollo.WhisperAudioListener()
             if ptt:
                 fallback_listener.ptt_controller = ptt
-            fallback_listener.start()
+            try:
+                fallback_listener.start()
+            except KeyboardInterrupt:
+                print("\n  Biggie shut down. See you later!")
+                debug_event("shutdown_keyboard_interrupt")
+                apollo.say("Goodbye")
         else:
             print("  !! Local Whisper fallback is not installed.")
             print("     Install it with: pip3 install openai-whisper")
